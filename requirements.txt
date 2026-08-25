@@ -1,36 +1,48 @@
-# python >= 3.10  (langchain-qdrant 1.x 요구사항)
+# 서버 환경(conda: openalex_vdb)에 설치된 버전으로 고정.
+# 갱신하려면:  python scripts/freeze.py > requirements.txt
 #
-#   pip install -r requirements.txt
+# python >= 3.10  (langchain-qdrant 1.x 요구사항. 서버는 3.13.x)
 #
-# GPU 로 임베딩할 머신이면 torch 를 먼저 CUDA 빌드로 깔고 이 파일을 설치하세요.
-# 그냥 설치하면 CPU 전용 휠이 잡힐 수 있습니다.
-#   https://pytorch.org/get-started/locally/
-#   예) pip install torch --index-url https://download.pytorch.org/whl/cu124
+# 서버 GPU: NVIDIA A6000 (Ampere, sm_86) / CUDA 12.4
+# 아래 --extra-index-url 로 cu124 휠을 받는다. 명시하지 않으면 CPU 전용 휠이
+# 잡힐 수 있다. 확실히 하려면 torch 만 먼저 깔아도 된다:
+#   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu124
+#
+# 설치 후 확인:
+#   python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+#   -> 2.13.0+cu124 12.4 True
 #
 # 역할별로 필요한 것만 깔아도 됩니다:
 #   preprocess.py --stage filter/abstract  -> [공통] + [전처리]
-#   preprocess.py --stage embed            -> [공통] + [임베딩]
+#   preprocess.py --stage embed            -> [공통] + [임베딩/리랭커]
 #   post.py                                -> [공통] + [Qdrant]
 #   api.py                                 -> 전부
 #   scripts/client.py                      -> 아무것도 필요 없음 (표준 라이브러리만)
 
 # ---------------------------------------------------------------- [공통]
-numpy>=1.24
-tqdm>=4.66
-orjson>=3.9            # 9천만 줄 json 파싱. 없어도 동작하지만 2~5배 느려짐
+numpy==2.4.6
+tqdm==4.70.0
+orjson==3.11.9
 
 # -------------------------------------------------------------- [전처리]
-pyarrow>=15.0
+pyarrow==15.0
 
-# --------------------------------------------------------------- [임베딩]
-torch>=2.2                   # 위 CUDA 안내 참고
-sentence-transformers>=5.2   # langchain-huggingface 의 선택 의존성이라 명시 필요
-langchain-huggingface>=1.0
+# ------------------------------------------------------- [임베딩 / 리랭커]
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.13.0
+sentence-transformers==5.7.0   # CrossEncoder(리랭커)도 여기서 온다
+transformers==5.15.0
+tokenizers==0.22.2
+huggingface-hub==1.27.0
+langchain-huggingface==1.2.2
+langchain-core==1.5.4
 
-# ---------------------------------------------------------------- [Qdrant]
-langchain-qdrant>=1.0
-qdrant-client>=1.15.1  # langchain-qdrant 가 끌어오지만 직접 쓰므로 명시
+# --------------------------------------------------------------- [Qdrant]
+langchain-qdrant==1.1.0
+qdrant-client==1.19.0
+pydantic==2.13.4
 
-# ------------------------------------------------------------------- [API]
-fastapi>=0.115
-uvicorn>=0.30
+# ------------------------------------------------------------------ [API]
+fastapi==0.141.1
+uvicorn==0.52.1
+starlette==1.6.0

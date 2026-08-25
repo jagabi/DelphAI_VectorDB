@@ -106,6 +106,36 @@ DTYPE = np.dtype("float16")          # row 당 2 KiB. float32 로 바꾸면 4 Ki
 ROW_BYTES = DIM * DTYPE.itemsize
 MAX_SEQ_LEN = _env_int("MAX_SEQ_LEN", 1024)
 
+# forward 배치. 같은 GPU 를 다른 모델(gemma 등)과 나눠 쓸 것을 전제로 작게 잡았다.
+# GPU 를 독점할 수 있으면 --embed-batch 256 처럼 직접 올리면 된다.
+EMBED_BATCH_CUDA = _env_int("EMBED_BATCH_CUDA", 64)
+EMBED_BATCH_CPU = _env_int("EMBED_BATCH_CPU", 16)
+
+# Ampere 이상에서 TF32 matmul. 추론 정확도 손실은 무시할 수준이고 눈에 띄게 빠르다.
+USE_TF32 = _env("USE_TF32", "1") not in ("0", "false", "False")
+
+# ---------------------------------------------------------------------------
+# GPU 메모리 상한
+# ---------------------------------------------------------------------------
+#
+# 같은 GPU 에 다른 모델을 같이 올릴 때, 이 프로세스가 쓸 수 있는 VRAM 을 제한한다.
+# torch.cuda.set_per_process_memory_fraction 으로 캐싱 할당자의 상한을 건다.
+# 넘으면 OOM 이 나지만, 임베딩/리랭커 모두 OOM 시 배치를 절반으로 줄여 재시도하므로
+# 죽지 않고 상한 안에서 알아서 맞춰 돌아간다.
+#
+#   0  = 제한 없음 (GPU 독점)
+#   12 = 12 GiB 까지만
+
+GPU_MEMORY_GIB = float(_env("GPU_MEMORY_GIB", "0"))
+
+# 요청 처리 후 캐싱 할당자가 붙들고 있는 블록을 드라이버에 돌려준다.
+# 조금 느려지지만 옆에서 도는 모델이 그만큼 쓸 수 있게 된다.
+RELEASE_CACHE = _env("RELEASE_CACHE", "1") not in ("0", "false", "False")
+
+# 단편화를 줄여 상한 안에서 더 많이 쓸 수 있게 한다.
+# torch 가 CUDA 를 초기화하기 전에 설정되어야 해서 여기서 건다.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 
 # ---------------------------------------------------------------------------
 # 리랭커 (cross-encoder)
@@ -116,7 +146,8 @@ MAX_SEQ_LEN = _env_int("MAX_SEQ_LEN", 1024)
 
 RERANKER_MODEL = _env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 RERANKER_MAX_LENGTH = _env_int("RERANKER_MAX_LENGTH", 512)
-RERANKER_BATCH = _env_int("RERANKER_BATCH", 32)
+RERANKER_BATCH_CUDA = _env_int("RERANKER_BATCH_CUDA", 16)
+RERANKER_BATCH_CPU = _env_int("RERANKER_BATCH_CPU", 8)
 
 # ---------------------------------------------------------------------------
 # 검색 기본값

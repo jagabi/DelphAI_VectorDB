@@ -39,10 +39,12 @@ def run_embed(args) -> int:
     model, device = embedding.build(
         args.device, batch_size=args.embed_batch,
         max_seq_len=args.max_seq_len, fp32=args.fp32,
-        show_progress=args.show_progress,
+        show_progress=args.show_progress, tf32=not args.no_tf32,
+        memory_gib=args.gpu_memory,
     )
+    encode_batch = model.encode_kwargs.get("batch_size")
     print(f"[model] {C.MODEL_NAME} on {device} | max_len={args.max_seq_len} "
-          f"| encode_batch={args.embed_batch}")
+          f"| encode_batch={encode_batch}")
     if device == "cpu":
         print("[warn] GPU가 없습니다. bge-m3(568M)는 CPU에서 매우 느립니다.")
 
@@ -72,8 +74,14 @@ def parse_args(argv=None):
     g.add_argument("--device", default="auto", help="auto | cuda | cuda:0 | cpu")
     g.add_argument("--fp32", action="store_true", help="GPU에서도 fp16 대신 fp32")
     g.add_argument("--max-seq-len", type=int, default=C.MAX_SEQ_LEN)
-    g.add_argument("--embed-batch", type=int, default=64,
-                   help="모델 forward 배치. GPU 메모리에 직결 (A6000이면 128~256)")
+    g.add_argument("--embed-batch", type=int, default=None,
+                   help=f"모델 forward 배치. 기본은 장치에 따라 "
+                        f"cuda={C.EMBED_BATCH_CUDA} / cpu={C.EMBED_BATCH_CPU}")
+    g.add_argument("--no-tf32", action="store_true",
+                   help="Ampere TF32 matmul 끄기 (기본은 켬)")
+    g.add_argument("--gpu-memory", type=float, default=C.GPU_MEMORY_GIB,
+                   metavar="GIB",
+                   help="VRAM 상한(GiB). 0=제한 없음")
     g.add_argument("--batch-size", type=int, default=512,
                    help="파일에 한 번에 append 할 row 수 = 진행바/재개 단위")
     g.add_argument("--show-progress", action="store_true", help="모델 자체 진행바")

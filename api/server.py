@@ -24,7 +24,7 @@ from qdrant_client import models
 
 from src import config as C
 from src import dedupe as dd
-from src import embedding, store
+from src import embedding, gpu, store
 
 from .models import (Filters, Health, Hit, KeywordRequest, SearchRequest,
                      SearchResponse)
@@ -190,6 +190,8 @@ def search(req: SearchRequest) -> SearchResponse:
 
     reranked = maybe_rerank(req.query, items, want=req.rerank, top_k=req.limit)
     took = (time.perf_counter() - began) * 1000
+    if C.RELEASE_CACHE:
+        gpu.release(STATE["device"])   # 옆에서 도는 모델에 VRAM 을 돌려준다
 
     return SearchResponse(query=req.query, mode="vector", count=len(items),
                           took_ms=round(took, 1), candidates=found,
@@ -221,6 +223,8 @@ def keyword(req: KeywordRequest) -> SearchResponse:
     if not reranked:
         del items[req.limit:]
     took = (time.perf_counter() - began) * 1000
+    if C.RELEASE_CACHE:
+        gpu.release(STATE["device"])
 
     return SearchResponse(query=req.query, mode="keyword", count=len(items),
                           took_ms=round(took, 1), candidates=found,
@@ -239,19 +243,23 @@ def _text_match(text: str, phrase: bool):
 # ---------------------------------------------------------------------------
 
 def build(device: str = "auto", api_key: str = "", *, with_reranker: bool = True,
-          reranker_device: str | None = None) -> str:
+          reranker_device: str | None = None, tf32: bool = True,
+          memory_gib: float | None = None) -> str:
     """모델과 벡터스토어를 올리고 API 키를 확정한다. 키를 반환."""
     key = api_key or C.SEARCH_API_KEY or secrets.token_urlsafe(24)
     STATE["api_key"] = key
 
-    embeddings, resolved = embedding.build(device, batch_size=8)
+    # 질의는 한 번에 하나라 배치를 크게 잡을 이유가 없다
+    embeddings, resolved = embedding.build(device, batch_size=8, tf32=tf32,
+                                           memory_gib=memory_gib)
     STATE["device"] = resolved
     STATE["store"] = store.build_search_store(embeddings)
     print(f"[model] embedding {C.MODEL_NAME} on {resolved}")
 
     if with_reranker:
         from src.reranker import Reranker
-        model = Reranker(device=reranker_device or device)
+        model = Reranker(device=reranker_device or device, tf32=tf32,
+                         memory_gib=memory_gib)
         STATE["reranker"] = model
         print(f"[model] reranker  {model.model_name} on {model.device} "
               f"(max_len={model.max_length}, batch={model.batch_size})")

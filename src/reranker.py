@@ -18,22 +18,39 @@ import inspect
 import torch
 
 from . import config as C
+from . import gpu
 from .embedding import is_oom, resolve_device
 
 
 def _build_cross_encoder(model_name: str, device: str, max_length: int, fp16: bool):
-    """sentence-transformers 버전에 따라 fp16 전달 인자 이름이 다르다."""
+    """sentence-transformers 버전에 따라 모델 인자 이름이 다르다.
+
+    5.x 는 model_kwargs, 그 이전은 automodel_args 를 쓴다. 시그니처를 보고 고른다.
+    """
     from sentence_transformers import CrossEncoder
 
+    params = inspect.signature(CrossEncoder.__init__).parameters
     kwargs = {"device": device, "max_length": max_length}
+
+    inner = {}
     if fp16 and device.startswith("cuda"):
-        params = inspect.signature(CrossEncoder.__init__).parameters
-        dtype = {"torch_dtype": torch.float16}
-        if "model_kwargs" in params:
-            kwargs["model_kwargs"] = dtype
-        elif "automodel_args" in params:
-            kwargs["automodel_args"] = dtype
-    return CrossEncoder(model_name, **kwargs)
+        inner["torch_dtype"] = torch.float16
+    inner.update(gpu.attention_kwargs())
+
+    slot = "model_kwargs" if "model_kwargs" in params else (
+        "automodel_args" if "automodel_args" in params else None)
+
+    if slot is None:
+        return CrossEncoder(model_name, **kwargs)
+
+    try:
+        return CrossEncoder(model_name, **kwargs, **{slot: inner})
+    except (TypeError, ValueError) as exc:
+        # attn_implementation 을 모르는 조합이면 그것만 빼고 재시도
+        if "attn_implementation" not in str(exc):
+            raise
+        inner.pop("attn_implementation", None)
+        return CrossEncoder(model_name, **kwargs, **{slot: inner})
 
 
 class Reranker:
@@ -41,13 +58,18 @@ class Reranker:
 
     def __init__(self, model_name: str | None = None, device: str = "auto", *,
                  max_length: int | None = None, batch_size: int | None = None,
-                 fp32: bool = False):
+                 fp32: bool = False, tf32: bool = True,
+                 memory_gib: float | None = None):
         self.model_name = model_name or C.RERANKER_MODEL
         self.device = resolve_device(device)
+        gpu.tune(self.device, tf32=tf32, memory_gib=memory_gib)
+
         self.max_length = max_length or C.RERANKER_MAX_LENGTH
-        self.batch_size = batch_size or C.RERANKER_BATCH
+        self.batch_size = batch_size or gpu.default_batch(
+            self.device, cuda=C.RERANKER_BATCH_CUDA, cpu=C.RERANKER_BATCH_CPU)
         self.model = _build_cross_encoder(
             self.model_name, self.device, self.max_length, not fp32)
+        gpu.report_memory(self.device, "reranker")
 
     def score(self, query: str, documents: list[str], warn=print) -> list[float]:
         """OOM 이 나면 배치를 절반으로 줄여 재시도한다."""
@@ -57,8 +79,9 @@ class Reranker:
         batch = self.batch_size
         while True:
             try:
-                scores = self.model.predict(pairs, batch_size=batch,
-                                            show_progress_bar=False)
+                with torch.inference_mode():
+                    scores = self.model.predict(pairs, batch_size=batch,
+                                                show_progress_bar=False)
                 return [float(s) for s in scores]
             except Exception as exc:
                 if not is_oom(exc) or batch <= 1:

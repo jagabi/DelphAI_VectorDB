@@ -166,11 +166,45 @@ OpenAlex 에는 같은 논문이 여러 레코드로 들어있다. 출판사 원
 ## API
 
 ```bash
-python api.py                 # 임베딩 + 리랭커를 GPU 에 올리고 터널까지
-python api.py --no-reranker   # VRAM 절약 (순위 품질 하락)
-python api.py --device cuda:1 # 다른 GPU
-python api.py --no-tunnel     # 로컬만
+python api.py                       # 임베딩 + 리랭커를 GPU 에 올리고 터널까지
+python api.py --gpu-memory 12       # VRAM 을 12 GiB 로 제한
+python api.py --no-reranker         # 리랭커 없이 (VRAM 절약, 순위 품질 하락)
+python api.py --device cuda:1       # 다른 GPU
+python api.py --no-tunnel           # 로컬만
 ```
+
+### GPU 를 다른 모델과 나눠 쓸 때
+
+`--gpu-memory` 또는 `.env` 의 `GPU_MEMORY_GIB` 로 이 프로세스의 VRAM 상한을 건다.
+`torch.cuda.set_per_process_memory_fraction` 으로 캐싱 할당자를 묶는 방식이라,
+상한을 넘으면 OOM 이 나지만 **임베딩·리랭커 모두 OOM 시 배치를 절반으로 줄여
+재시도**하므로 죽지 않고 상한 안에서 알아서 맞춰 돌아간다.
+
+```bash
+python api.py --gpu-memory 4    # 검색은 4 GiB, 나머지 44 GiB 는 gemma 몫
+```
+
+상한에 맞춰 배치 기본값도 자동으로 낮아진다:
+
+| 상한 | 임베딩 배치 | 리랭커 배치 |
+|---|---|---|
+| 없음 / 16 GiB 이상 | 64 | 16 |
+| 8~16 GiB | 32 | 8 |
+| 8 GiB 미만 | 16 | 4 |
+
+가중치는 fp16 기준 bge-m3 1.2 GiB + 리랭커 1.2 GiB = **2.4 GiB**. 4 GiB 면
+activation 에 1.6 GiB 가 남는 셈이라 동작하지만 여유가 얇다. 6 GiB 면 배치는
+같으면서 안정적이고, 8 GiB 부터 배치가 2배로 올라간다.
+
+CUDA 컨텍스트(0.3~0.6 GiB)는 이 상한 바깥이라 `nvidia-smi` 에는 상한보다
+그만큼 더 잡힌다.
+
+추가로 `RELEASE_CACHE=1`(기본) 이면 요청을 마칠 때마다 `torch.cuda.empty_cache()`
+로 붙들고 있던 블록을 돌려준다. torch 는 한 번 확보한 VRAM 을 재사용하려고 계속
+쥐고 있어서, 옆에서 다른 모델이 돌면 그게 그대로 압박이 되기 때문이다.
+
+배치 기본값도 GPU 공유를 전제로 작게 잡혀 있다 (임베딩 64, 리랭커 16).
+GPU 를 독점할 수 있으면 `--embed-batch 256` 처럼 올리면 된다.
 
 `X-API-Key` 가 콘솔에 찍힌다. `.env` 의 `SEARCH_API_KEY` 에 적어두면 고정된다.
 터널 주소는 퀵 터널이면 매번 바뀌고, named tunnel 을 만들면 고정된다.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""BGE-M3 임베딩. GPU 있으면 GPU(fp16), 없으면 CPU."""
+"""BGE-M3 임베딩. GPU 있으면 GPU(fp16 + TF32 + SDPA), 없으면 CPU."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 import torch
 
 from . import config as C
+from . import gpu
 
 # torch 1.13+ 는 전용 예외가 있지만, 없으면 메시지로 판별한다
 _OOM = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)
@@ -27,22 +28,53 @@ def resolve_device(requested: str = "auto") -> str:
 def build(
     device: str = "auto",
     *,
-    batch_size: int = 64,
+    batch_size: int | None = None,
     max_seq_len: int | None = None,
     fp32: bool = False,
     show_progress: bool = False,
     model_name: str | None = None,
+    tf32: bool = True,
+    memory_gib: float | None = None,
 ):
     """LangChain HuggingFaceEmbeddings 로 bge-m3 를 올린다."""
     from langchain_huggingface import HuggingFaceEmbeddings
 
     device = resolve_device(device)
-    model_kwargs: dict[str, Any] = {"device": device}
-    if device.startswith("cuda") and not fp32:
-        # SentenceTransformer(..., model_kwargs={"torch_dtype": ...}) 로 전달된다
-        model_kwargs["model_kwargs"] = {"torch_dtype": torch.float16}
+    gpu.tune(device, tf32=tf32, memory_gib=memory_gib)
 
-    embeddings = HuggingFaceEmbeddings(
+    if batch_size is None:
+        batch_size = gpu.default_batch(device, cuda=C.EMBED_BATCH_CUDA,
+                                       cpu=C.EMBED_BATCH_CPU)
+
+    inner: dict[str, Any] = {}
+    if device.startswith("cuda") and not fp32:
+        inner["torch_dtype"] = torch.float16
+    inner.update(gpu.attention_kwargs())
+
+    model_kwargs: dict[str, Any] = {"device": device, "model_kwargs": inner}
+
+    try:
+        embeddings = _make(model_name, model_kwargs, batch_size, show_progress)
+    except (TypeError, ValueError) as exc:
+        # attn_implementation 을 모르는 조합이면 그것만 빼고 재시도
+        if "attn_implementation" not in str(exc):
+            raise
+        inner.pop("attn_implementation", None)
+        embeddings = _make(model_name, model_kwargs, batch_size, show_progress)
+
+    # 초록은 길어야 수백 토큰. 8192 컨텍스트를 다 열면 느려지기만 한다.
+    st_model = getattr(embeddings, "_client", None) or getattr(embeddings, "client", None)
+    if st_model is not None:
+        st_model.max_seq_length = max_seq_len or C.MAX_SEQ_LEN
+
+    gpu.report_memory(device, "embedding")
+    return embeddings, device
+
+
+def _make(model_name, model_kwargs, batch_size, show_progress):
+    from langchain_huggingface import HuggingFaceEmbeddings
+
+    return HuggingFaceEmbeddings(
         model_name=model_name or C.MODEL_NAME,
         model_kwargs=model_kwargs,
         # bge-m3 는 query instruction 없이 학습된 모델이라 별도 프롬프트가 필요 없다.
@@ -50,13 +82,6 @@ def build(
         encode_kwargs={"normalize_embeddings": True, "batch_size": batch_size},
         show_progress=show_progress,
     )
-
-    # 초록은 길어야 수백 토큰. 8192 컨텍스트를 다 열면 느려지기만 한다.
-    st_model = getattr(embeddings, "_client", None) or getattr(embeddings, "client", None)
-    if st_model is not None:
-        st_model.max_seq_length = max_seq_len or C.MAX_SEQ_LEN
-
-    return embeddings, device
 
 
 def encode(embeddings, texts: list[str], warn=print) -> list[list[float]]:

@@ -38,6 +38,12 @@ def parse_args(argv=None):
                    help="리랭커만 다른 장치에 올릴 때. 기본은 --device 와 같음")
     p.add_argument("--no-reranker", action="store_true",
                    help="리랭커를 올리지 않음 (VRAM 절약, 순위 품질 하락)")
+    p.add_argument("--no-tf32", action="store_true",
+                   help="Ampere TF32 matmul 끄기 (기본은 켬)")
+    p.add_argument("--gpu-memory", type=float, default=C.GPU_MEMORY_GIB,
+                   metavar="GIB",
+                   help="이 프로세스가 쓸 VRAM 상한(GiB). 0=제한 없음. "
+                        "같은 GPU 에 다른 모델을 올릴 때 쓴다")
     p.add_argument("--api-key", default="", help="비우면 .env 값, 그것도 없으면 임의 생성")
 
     p.add_argument("--no-tunnel", action="store_true", help="cloudflared 를 띄우지 않음")
@@ -62,7 +68,8 @@ def main(argv=None) -> int:
     print("[api] 모델과 컬렉션을 여는 중입니다...")
     server.build(device=args.device, api_key=key,
                  with_reranker=not args.no_reranker,
-                 reranker_device=args.reranker_device)
+                 reranker_device=args.reranker_device,
+                 tf32=not args.no_tf32, memory_gib=args.gpu_memory)
 
     tunnel = None
     if not args.no_tunnel:
