@@ -1,0 +1,36 @@
+# python >= 3.10  (langchain-qdrant 1.x 요구사항)
+#
+#   pip install -r requirements.txt
+#
+# GPU 로 임베딩할 머신이면 torch 를 먼저 CUDA 빌드로 깔고 이 파일을 설치하세요.
+# 그냥 설치하면 CPU 전용 휠이 잡힐 수 있습니다.
+#   https://pytorch.org/get-started/locally/
+#   예) pip install torch --index-url https://download.pytorch.org/whl/cu124
+#
+# 역할별로 필요한 것만 깔아도 됩니다:
+#   preprocess.py --stage filter/abstract  -> [공통] + [전처리]
+#   preprocess.py --stage embed            -> [공통] + [임베딩]
+#   post.py                                -> [공통] + [Qdrant]
+#   api.py                                 -> 전부
+#   scripts/client.py                      -> 아무것도 필요 없음 (표준 라이브러리만)
+
+# ---------------------------------------------------------------- [공통]
+numpy>=1.24
+tqdm>=4.66
+orjson>=3.9            # 9천만 줄 json 파싱. 없어도 동작하지만 2~5배 느려짐
+
+# -------------------------------------------------------------- [전처리]
+pyarrow>=15.0
+
+# --------------------------------------------------------------- [임베딩]
+torch>=2.2                   # 위 CUDA 안내 참고
+sentence-transformers>=5.2   # langchain-huggingface 의 선택 의존성이라 명시 필요
+langchain-huggingface>=1.0
+
+# ---------------------------------------------------------------- [Qdrant]
+langchain-qdrant>=1.0
+qdrant-client>=1.15.1  # langchain-qdrant 가 끌어오지만 직접 쓰므로 명시
+
+# ------------------------------------------------------------------- [API]
+fastapi>=0.115
+uvicorn>=0.30

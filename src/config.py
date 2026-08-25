@@ -1,0 +1,224 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""전 파이프라인 공용 설정. 값은 전부 환경변수로 덮어쓸 수 있다.
+
+.env 파일이 있으면 자동으로 읽는다 (python-dotenv 없이 직접 파싱).
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv(path: Path) -> None:
+    """의존성 없이 KEY=VALUE 만 읽는다. 이미 설정된 환경변수는 덮어쓰지 않는다."""
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+_load_dotenv(REPO_ROOT / ".env")
+
+
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+# ---------------------------------------------------------------------------
+# 데이터 레이아웃
+# ---------------------------------------------------------------------------
+#
+#   <DATA_ROOT>/2021/part_0000.jsonl     원본
+#   <DATA_ROOT>/2021/part_0000.f16       임베딩      (preprocess.py 생성)
+#   <DATA_ROOT>/2021/part_0000.posted    적재 위치   (post.py 생성)
+#
+# 핵심 규칙: .f16 의 N번째 row == .jsonl 의 N번째 줄.
+# 빈 줄, 깨진 JSON, abstract 없는 문서도 자리를 비우지 않고 영벡터를 채운다.
+# 덕분에 .f16 파일 크기가 곧 진행 위치라 별도 체크포인트가 필요 없다.
+
+DATA_ROOT = _env("DATA_ROOT", "openalex_2021-2025_postprocessed")
+YEARS = _env("YEARS", "2021,2022,2023,2024,2025").split(",")
+
+TEXT_FIELD = "abstract"              # 임베딩 대상 = LangChain 의 page_content
+KEY_MAP = {"id": "openalex_id"}      # raw jsonl key -> qdrant payload field
+
+# ---------------------------------------------------------------------------
+# 전처리 (filter.py / fill_abs.py)
+# ---------------------------------------------------------------------------
+#
+# OpenAlex parquet 덤프의 위치. 전처리를 다시 돌릴 때만 필요하다.
+
+PARQUET_ROOT = _env("PARQUET_ROOT", "OpenAlex_20260330_integrated_parsed_parquet")
+
+SOURCES_SUBDIR = _env(
+    "SOURCES_SUBDIR",
+    "nonworks_20260330_update/openalex_sources_20260330_delta"
+    "/openalex_sources_20260330_delta",
+)
+WORKS_SUBDIR = _env(
+    "WORKS_SUBDIR",
+    "works_20260330_integrated/openalex_works_20260330",
+)
+ABSTRACT_SUBDIR = _env(
+    "ABSTRACT_SUBDIR",
+    "works_20260330_integrated"
+    "/openalex_works_20260330__excepted__abstract_inverted_index",
+)
+
+# 전처리 중간 산출물. 전부 DATA_ROOT 아래 (.gitignore 대상)
+LOGS_SUBDIR = "logs"
+CACHE_SUBDIR = "cache"
+SIDECAR_SUBDIR = "_abs_sidecar"
+FILTERED_ID_NAME = "filtered_id.jsonl"
+
+ROWS_PER_PART = _env_int("ROWS_PER_PART", 1_000_000)
+ATTACH_COUNTRY = _env("ATTACH_COUNTRY", "1") not in ("0", "false", "False")
+
+# abstract 가 비었을 때 title 로 대체할지.
+# preprocess 와 post 가 반드시 같은 값을 봐야 하므로 상수로 둔다.
+FALLBACK_TO_TITLE = False
+
+
+# ---------------------------------------------------------------------------
+# 임베딩
+# ---------------------------------------------------------------------------
+
+MODEL_NAME = _env("BGE_MODEL", "BAAI/bge-m3")
+DIM = 1024
+DTYPE = np.dtype("float16")          # row 당 2 KiB. float32 로 바꾸면 4 KiB
+ROW_BYTES = DIM * DTYPE.itemsize
+MAX_SEQ_LEN = _env_int("MAX_SEQ_LEN", 1024)
+
+
+# ---------------------------------------------------------------------------
+# 리랭커 (cross-encoder)
+# ---------------------------------------------------------------------------
+#
+# bge-m3 의 짝. 같은 XLM-R large 계열이라 다국어 커버리지가 같다.
+# 벡터 검색으로 후보를 좁힌 뒤 상위권 순서를 다시 매기는 데 쓴다.
+
+RERANKER_MODEL = _env("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANKER_MAX_LENGTH = _env_int("RERANKER_MAX_LENGTH", 512)
+RERANKER_BATCH = _env_int("RERANKER_BATCH", 32)
+
+# ---------------------------------------------------------------------------
+# 검색 기본값
+# ---------------------------------------------------------------------------
+
+SEARCH_CANDIDATES = _env_int("SEARCH_CANDIDATES", 50)   # 벡터로 뽑는 후보 수
+SEARCH_LIMIT = _env_int("SEARCH_LIMIT", 10)             # 리랭커 통과 후 최종 개수
+KEYWORD_LIMIT = _env_int("KEYWORD_LIMIT", 5)            # 제목 키워드 검색 기본 개수
+
+
+# ---------------------------------------------------------------------------
+# Qdrant
+# ---------------------------------------------------------------------------
+
+QDRANT_URL = _env("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.environ.get("QDRANT_API_KEY") or None
+COLLECTION = _env("QDRANT_COLLECTION", "openalex_2021-2025_abs")
+VECTOR_NAME = ""                     # langchain-qdrant 의 기본 dense 벡터 이름
+
+# 컬렉션 생성 파라미터
+HNSW_M = _env_int("HNSW_M", 24)
+HNSW_EF_CONSTRUCT = _env_int("HNSW_EF_CONSTRUCT", 256)
+HNSW_PAYLOAD_M = _env_int("HNSW_PAYLOAD_M", 24)
+SEGMENT_NUMBER = _env_int("SEGMENT_NUMBER", 16)
+INDEXING_THRESHOLD = _env_int("INDEXING_THRESHOLD", 10000)
+
+# payload 인덱스.
+#
+# 인덱스는 "필터 검색"을 위한 것이고 payload 저장과는 무관하다. 여기서 빼도
+# 해당 필드는 그대로 저장되고 검색 결과에도 딸려 나온다.
+#
+# 인덱스 하나하나가 회수 불가능한 램을 점유하고, 그 비용이
+# (인덱스 개수 x 세그먼트 개수) 로 곱해진다. payload_m 때문에 인덱싱된
+# 필드마다 HNSW 에 추가 링크도 붙는다. 그래서 실제로 필터에 쓸 것만 남긴다.
+#
+# 제외한 것: abstract(전문 인덱스는 88M 기준 47 GiB, 의미 검색은 벡터가 담당),
+#            publication_date(year 로 충분), openalex_id/doi/issn_l(전부 고유값),
+#            *__id 계열(대응하는 *__display_name 과 1:1 중복), host_organization*
+
+KEYWORD_INDEXES = [
+    "type",
+    "country_code",
+    "primary_location__source__display_name",
+    "primary_topic__display_name",
+    "primary_topic__domain__display_name",
+    "primary_topic__field__display_name",
+    "primary_topic__subfield__display_name",
+]
+TEXT_INDEXES = ["title"]             # 제목 안의 단어/구문 검색용
+INTEGER_INDEXES = ["publication_year"]
+DATETIME_INDEXES: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# API / 터널
+# ---------------------------------------------------------------------------
+
+API_HOST = _env("API_HOST", "127.0.0.1")
+API_PORT = _env_int("API_PORT", 8000)
+
+# 비워두면 실행할 때마다 임의로 생성된다. .env 에 적어두면 고정된다.
+SEARCH_API_KEY = os.environ.get("SEARCH_API_KEY", "")
+
+# 비워두면 cloudflared 퀵 터널(*.trycloudflare.com, 매번 주소가 바뀜).
+# 값을 넣으면 named tunnel 을 실행해 고정 주소를 쓴다.
+CLOUDFLARE_TUNNEL_NAME = os.environ.get("CLOUDFLARE_TUNNEL_NAME", "")
+CLOUDFLARED_BIN = _env("CLOUDFLARED_BIN", "cloudflared")
+
+
+def _resolve(raw: str | Path) -> Path:
+    """상대경로는 (1) 현재 작업 디렉토리 (2) 레포 루트 순으로 찾는다."""
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    for base in (Path.cwd(), REPO_ROOT):
+        candidate = (base / path).resolve()
+        if candidate.exists():
+            return candidate
+    return (REPO_ROOT / path).resolve()
+
+
+def resolve_data_root(raw: str | None = None) -> Path:
+    return _resolve(raw or DATA_ROOT)
+
+
+def resolve_parquet_root(raw: str | None = None) -> Path:
+    return _resolve(raw or PARQUET_ROOT)
+
+
+class Workspace:
+    """전처리 산출물 경로 모음. DATA_ROOT 하나에서 파생된다."""
+
+    def __init__(self, data_root: Path | None = None):
+        self.root = data_root or resolve_data_root()
+        self.logs = self.root / LOGS_SUBDIR
+        self.cache = self.root / CACHE_SUBDIR
+        self.sidecar = self.root / SIDECAR_SUBDIR
+        self.filtered_ids = self.root / FILTERED_ID_NAME
+
+    def ensure(self) -> None:
+        for path in (self.root, self.logs, self.cache):
+            path.mkdir(parents=True, exist_ok=True)
+
+    def year_dir(self, year: int | str) -> Path:
+        return self.root / str(year)

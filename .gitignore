@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------- 데이터
+# 원본 jsonl, 임베딩(.f16), 적재 진행 표시(.posted) 전부 여기 들어간다.
+openalex_2021-2025_postprocessed/
+data/
+
+# Qdrant 스토리지 (수백 GB)
+qdrant/
+qdrant_snapshots/
+qdrant_temp/
+
+# 중간 산출물
+*.f16
+*.posted
+*.jsonl
+!examples/*.jsonl
+
+# ------------------------------------------------------------------ 비밀
+.env
+*.pem
+cloudflared/credentials.json
+.cloudflared/
+
+# ------------------------------------------------------------------ 파이썬
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ------------------------------------------------------------------ 기타
+.ipynb_checkpoints/
+logs/
+*.log
+.DS_Store
+.vscode/
+.idea/
