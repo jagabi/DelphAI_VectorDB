@@ -246,7 +246,7 @@ def build(device: str = "auto", api_key: str = "", *, with_reranker: bool = True
           reranker_device: str | None = None, tf32: bool = True,
           memory_gib: float | None = None) -> str:
     """모델과 벡터스토어를 올리고 API 키를 확정한다. 키를 반환."""
-    key = api_key or C.SEARCH_API_KEY or secrets.token_urlsafe(24)
+    key = api_key or C.API_KEY or secrets.token_urlsafe(24)
     STATE["api_key"] = key
 
     # 질의는 한 번에 하나라 배치를 크게 잡을 이유가 없다

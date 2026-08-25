@@ -209,11 +209,11 @@ API_HOST = _env("API_HOST", "127.0.0.1")
 API_PORT = _env_int("API_PORT", 8000)
 
 # 비워두면 실행할 때마다 임의로 생성된다. .env 에 적어두면 고정된다.
-SEARCH_API_KEY = os.environ.get("SEARCH_API_KEY", "")
+API_KEY = os.environ.get("OPENALEX_VDB_API_KEY", "")
 
-# 비워두면 cloudflared 퀵 터널(*.trycloudflare.com, 매번 주소가 바뀜).
-# 값을 넣으면 named tunnel 을 실행해 고정 주소를 쓴다.
-CLOUDFLARE_TUNNEL_NAME = os.environ.get("CLOUDFLARE_TUNNEL_NAME", "")
+# cloudflared named tunnel 이름. 비우면 퀵 터널(주소가 매번 바뀜).
+# named tunnel 은 주소가 고정되지만 본인 소유 도메인이 Cloudflare 에 있어야 한다.
+TUNNEL_NAME = os.environ.get("TUNNEL_NAME", "")
 CLOUDFLARED_BIN = _env("CLOUDFLARED_BIN", "cloudflared")
 
 
@@ -246,10 +246,3 @@ class Workspace:
         self.cache = self.root / CACHE_SUBDIR
         self.sidecar = self.root / SIDECAR_SUBDIR
         self.filtered_ids = self.root / FILTERED_ID_NAME
-
-    def ensure(self) -> None:
-        for path in (self.root, self.logs, self.cache):
-            path.mkdir(parents=True, exist_ok=True)
-
-    def year_dir(self, year: int | str) -> Path:
-        return self.root / str(year)

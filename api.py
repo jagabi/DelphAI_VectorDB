@@ -6,7 +6,7 @@
     python api.py --no-tunnel         # 로컬만
     python api.py --tunnel-name mytun # named tunnel (주소 고정)
 
-API 키는 .env 의 SEARCH_API_KEY 를 쓴다. 비어 있으면 실행할 때마다 새로 만들어
+API 키는 .env 의 OPENALEX_VDB_API_KEY 를 쓴다. 비어 있으면 실행할 때마다 새로 만들어
 콘솔에 찍는다. 고정하려면 .env 에 적어두면 된다.
 
 두 프로세스를 따로 띄울 필요는 없다. 이 스크립트가
@@ -47,7 +47,7 @@ def parse_args(argv=None):
     p.add_argument("--api-key", default="", help="비우면 .env 값, 그것도 없으면 임의 생성")
 
     p.add_argument("--no-tunnel", action="store_true", help="cloudflared 를 띄우지 않음")
-    p.add_argument("--tunnel-name", default=C.CLOUDFLARE_TUNNEL_NAME,
+    p.add_argument("--tunnel-name", default=C.TUNNEL_NAME,
                    help="named tunnel 이름. 비우면 퀵 터널(주소가 매번 바뀜)")
     p.add_argument("--cloudflared", default=C.CLOUDFLARED_BIN)
     p.add_argument("--log-level", default="warning",
@@ -63,7 +63,7 @@ def main(argv=None) -> int:
     from api import server
     from api.tunnel import Tunnel
 
-    key = args.api_key or C.SEARCH_API_KEY or secrets.token_urlsafe(24)
+    key = args.api_key or C.API_KEY or secrets.token_urlsafe(24)
 
     print("[api] 모델과 컬렉션을 여는 중입니다...")
     server.build(device=args.device, api_key=key,
@@ -81,8 +81,8 @@ def main(argv=None) -> int:
     print(f"[api]  POST /search   의미 검색  (top {C.SEARCH_CANDIDATES} -> 리랭커 -> top {C.SEARCH_LIMIT})")
     print(f"[api]  POST /keyword  제목 키워드 (top {C.KEYWORD_LIMIT})")
     print(f"[key]  X-API-Key: {key}")
-    if not (args.api_key or C.SEARCH_API_KEY):
-        print("       고정하려면 .env 에  SEARCH_API_KEY=" + key)
+    if not (args.api_key or C.API_KEY):
+        print("       고정하려면 .env 에  OPENALEX_VDB_API_KEY=" + key)
     if tunnel and tunnel.name:
         print(f"[url]  named tunnel '{tunnel.name}' - 설정한 호스트명으로 접속")
     elif tunnel:

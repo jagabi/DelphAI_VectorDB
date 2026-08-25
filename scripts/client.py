@@ -4,8 +4,8 @@
 
 이 파일 하나만 복사해 가면 되고, torch 도 모델도 qdrant-client 도 필요 없다.
 
-    set SEARCH_URL=https://xxxx.trycloudflare.com
-    set SEARCH_API_KEY=...
+    set OPENALEX_VDB_URL=https://xxxx.trycloudflare.com
+    set OPENALEX_VDB_API_KEY=...
 
 검색 방식 두 가지:
 
@@ -139,9 +139,9 @@ def parse_args(argv=None):
     o.add_argument("--no-dedupe", action="store_true", help="중복 제거 끄기")
 
     c = p.add_argument_group("접속")
-    c.add_argument("--url", default=os.environ.get("SEARCH_URL",
+    c.add_argument("--url", default=os.environ.get("OPENALEX_VDB_URL",
                                                    "http://127.0.0.1:8000"))
-    c.add_argument("--key", default=os.environ.get("SEARCH_API_KEY", ""))
+    c.add_argument("--key", default=os.environ.get("OPENALEX_VDB_API_KEY", ""))
     c.add_argument("--timeout", type=int, default=120)
     return p.parse_args(argv)
 
@@ -174,7 +174,7 @@ def build_payload(query: str, args) -> tuple[str, dict]:
 def main(argv=None) -> int:
     args = parse_args(argv)
     if not args.key:
-        print("[error] API 키가 없습니다. --key 또는 환경변수 SEARCH_API_KEY",
+        print("[error] API 키가 없습니다. --key 또는 환경변수 OPENALEX_VDB_API_KEY",
               file=sys.stderr)
         return 2
 

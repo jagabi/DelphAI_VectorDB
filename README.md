@@ -206,13 +206,25 @@ CUDA 컨텍스트(0.3~0.6 GiB)는 이 상한 바깥이라 `nvidia-smi` 에는 �
 배치 기본값도 GPU 공유를 전제로 작게 잡혀 있다 (임베딩 64, 리랭커 16).
 GPU 를 독점할 수 있으면 `--embed-batch 256` 처럼 올리면 된다.
 
-`X-API-Key` 가 콘솔에 찍힌다. `.env` 의 `SEARCH_API_KEY` 에 적어두면 고정된다.
-터널 주소는 퀵 터널이면 매번 바뀌고, named tunnel 을 만들면 고정된다.
+`X-API-Key` 가 콘솔에 찍힌다. `.env` 의 `OPENALEX_VDB_API_KEY` 에 적어두면 고정된다.
+
+### 터널 주소
+
+퀵 터널은 계정 없이 즉석 발급되는 임시 주소라 **실행할 때마다 바뀐다.**
+Cloudflare 설계상 고정할 수 없다.
+
+주소를 고정하려면 named tunnel 을 쓴다. 본인 소유 도메인이 Cloudflare 에
+있어야 한다.
 
 ```bash
-curl -X POST https://xxxx.trycloudflare.com/search \
-  -H "Content-Type: application/json" -H "X-API-Key: $SEARCH_API_KEY" \
-  -d '{"query":"swarm robotics aggregation","limit":50}'
+cloudflared tunnel login                                    # 한 번만
+cloudflared tunnel create openalex
+cloudflared tunnel route dns openalex search.example.com
+python api.py --tunnel-name openalex
+```
+
+```bash
+curl -X POST https://xxxx.trycloudflare.com/search   -H "Content-Type: application/json" -H "X-API-Key: $OPENALEX_VDB_API_KEY"   -d '{"query":"swarm robotics aggregation","limit":10}'
 ```
 
 브라우저로 `/docs` 를 열면 바로 시험해볼 수 있다.
