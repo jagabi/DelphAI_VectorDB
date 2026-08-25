@@ -4,8 +4,13 @@
 
 이 파일 하나만 복사해 가면 되고, torch 도 모델도 qdrant-client 도 필요 없다.
 
-    set OPENALEX_VDB_URL=https://xxxx.trycloudflare.com
-    set OPENALEX_VDB_API_KEY=...
+접속 정보는 client.py 옆(또는 현재 디렉토리)의 .env 에서 읽는다:
+
+    OPENALEX_VDB_URL=https://xxxx.trycloudflare.com
+    OPENALEX_VDB_API_KEY=...
+
+우선순위는 명령행 인자 > 환경변수 > .env > 기본값.
+다른 파일을 쓰려면 --env 로 경로를 준다.
 
 검색 방식 두 가지:
 
@@ -30,10 +35,48 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 VECTOR_LIMIT = 10
 VECTOR_CANDIDATES = 50
 KEYWORD_LIMIT = 5
+
+ENV_URL = "OPENALEX_VDB_URL"
+ENV_KEY = "OPENALEX_VDB_API_KEY"
+
+
+def load_env(path: str | None = None) -> Path | None:
+    """.env 를 읽어 환경변수로 올린다. 이미 설정된 값은 덮어쓰지 않는다.
+
+    의존성을 늘리지 않으려고 KEY=VALUE 만 직접 파싱한다.
+    """
+    if path:
+        candidates = [Path(path)]
+    else:
+        here = Path(__file__).resolve().parent
+        candidates = [here / ".env", Path.cwd() / ".env"]
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        for raw in candidate.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        return candidate
+    return None
+
+
+def _env_path_from(argv: list[str]) -> str | None:
+    """argparse 기본값이 환경변수를 읽으므로 --env 는 파싱 전에 미리 본다."""
+    for i, arg in enumerate(argv):
+        if arg == "--env" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--env="):
+            return arg.split("=", 1)[1]
+    return None
 
 
 def clean(text: str | None) -> str:
@@ -52,8 +95,19 @@ def call(url: str, path: str, key: str, payload: dict, timeout: int) -> dict:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:500]
-        raise SystemExit(f"[error] HTTP {exc.code}: {body}") from None
+        body = exc.read().decode("utf-8", "replace")
+        try:                                   # 서버가 실어준 예외를 풀어준다
+            payload = json.loads(body)
+            if "error" in payload:
+                lines = [f"[error] HTTP {exc.code} {payload['error']}: "
+                         f"{payload.get('detail', '')}"]
+                if payload.get("hint"):
+                    lines.append(f"        {payload['hint']}")
+                raise SystemExit("\n".join(lines)) from None
+            body = payload.get("detail", body)
+        except ValueError:
+            pass
+        raise SystemExit(f"[error] HTTP {exc.code}: {str(body)[:800]}") from None
     except urllib.error.URLError as exc:
         raise SystemExit(f"[error] 접속 실패: {exc.reason}") from None
 
@@ -112,8 +166,10 @@ def parse_args(argv=None):
     v.add_argument("--candidates", type=int, default=VECTOR_CANDIDATES,
                    help="리랭킹 전에 벡터로 뽑을 후보 수")
     v.add_argument("--no-rerank", action="store_true", help="리랭커 끄기 (더 빠름)")
-    v.add_argument("--hnsw-ef", type=int, default=128, help="클수록 정확하고 느림")
-    v.add_argument("--no-rescore", action="store_true", help="원본 재정렬 끄기")
+    v.add_argument("--hnsw-ef", type=int, default=None,
+                   help="HNSW 탐색 폭. 클수록 정확하고 느림 (기본은 서버 설정)")
+    v.add_argument("--rescore", action="store_true",
+                   help="원본 float32 로 후보 재측정. 리랭커를 끌 때만 의미 있다")
 
     kw = p.add_argument_group("키워드 검색")
     kw.add_argument("--phrase", action="store_true", help="구문 전체로 일치")
@@ -138,10 +194,13 @@ def parse_args(argv=None):
     o.add_argument("--json", action="store_true", help="원본 JSON")
     o.add_argument("--no-dedupe", action="store_true", help="중복 제거 끄기")
 
-    c = p.add_argument_group("접속")
-    c.add_argument("--url", default=os.environ.get("OPENALEX_VDB_URL",
-                                                   "http://127.0.0.1:8000"))
-    c.add_argument("--key", default=os.environ.get("OPENALEX_VDB_API_KEY", ""))
+    c = p.add_argument_group("접속 (.env 로 대신할 수 있음)")
+    c.add_argument("--url", default=os.environ.get(ENV_URL, "http://127.0.0.1:8000"),
+                   help=f".env 의 {ENV_URL}")
+    c.add_argument("--key", default=os.environ.get(ENV_KEY, ""),
+                   help=f".env 의 {ENV_KEY}")
+    c.add_argument("--env", metavar="PATH", default=None,
+                   help="쓸 .env 경로 (기본: client.py 옆 또는 현재 디렉토리)")
     c.add_argument("--timeout", type=int, default=120)
     return p.parse_args(argv)
 
@@ -167,15 +226,23 @@ def build_payload(query: str, args) -> tuple[str, dict]:
     return "/search", {
         "query": query, "limit": limit, "candidates": args.candidates,
         "rerank": not args.no_rerank, "dedupe": dedupe,
-        "hnsw_ef": args.hnsw_ef, "rescore": not args.no_rescore, **filters,
+        "rescore": args.rescore,
+        **({"hnsw_ef": args.hnsw_ef} if args.hnsw_ef else {}), **filters,
     }
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    env_file = load_env(_env_path_from(argv))
     args = parse_args(argv)
+
     if not args.key:
-        print("[error] API 키가 없습니다. --key 또는 환경변수 OPENALEX_VDB_API_KEY",
+        target = env_file or Path(__file__).resolve().parent / ".env"
+        print(f"[error] API 키가 없습니다. {target} 에 아래를 넣으세요:",
               file=sys.stderr)
+        print(f"  {ENV_URL}=https://xxxx.trycloudflare.com", file=sys.stderr)
+        print(f"  {ENV_KEY}=서버가_찍어준_키", file=sys.stderr)
+        print("  (또는 --url / --key 로 직접 지정)", file=sys.stderr)
         return 2
 
     def run(query: str) -> None:
@@ -191,7 +258,8 @@ def main(argv=None) -> int:
         return 0
 
     mode = "keyword" if args.keyword_search else "vector"
-    print(f"[api] {args.url}  ({mode} search)")
+    source = f"  <- {env_file}" if env_file else ""
+    print(f"[api] {args.url}  ({mode} search){source}")
     print("질의를 입력하세요 (빈 줄이면 종료)")
     while True:
         try:

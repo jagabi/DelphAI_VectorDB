@@ -18,8 +18,10 @@ import html
 import secrets
 import threading
 import time
+import traceback
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from qdrant_client import models
 
 from src import config as C
@@ -149,6 +151,28 @@ app = FastAPI(
 )
 
 
+TIMEOUT_HINT = (
+    "Qdrant 검색이 제한시간 안에 끝나지 않았습니다. 보통 컬렉션 세그먼트가 많거나 "
+    "스토리지가 느릴 때 납니다. rescore=false, hnsw_ef 낮추기, candidates 줄이기 "
+    "순으로 시도해 보세요."
+)
+
+
+@app.exception_handler(Exception)
+def on_error(request: Request, exc: Exception) -> JSONResponse:
+    """맨 500 대신 실제 예외를 돌려준다.
+
+    API 키로 보호되는 내부용이라 예외 내용을 숨길 이유가 없고,
+    터널 너머에서 디버깅하려면 이게 훨씬 빠르다.
+    """
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
+    detail = str(exc)[:2000]
+    body = {"error": type(exc).__name__, "detail": detail, "path": request.url.path}
+    if "timed out" in detail.lower() or "timeout" in detail.lower():
+        body["hint"] = TIMEOUT_HINT
+    return JSONResponse(status_code=500, content=body)
+
+
 @app.get("/health", response_model=Health)
 def health() -> Health:
     info = STATE["store"].client.get_collection(C.COLLECTION)
@@ -253,7 +277,8 @@ def build(device: str = "auto", api_key: str = "", *, with_reranker: bool = True
     embeddings, resolved = embedding.build(device, batch_size=8, tf32=tf32,
                                            memory_gib=memory_gib)
     STATE["device"] = resolved
-    STATE["store"] = store.build_search_store(embeddings)
+    STATE["store"] = store.build_search_store(
+        embeddings, timeout=C.SEARCH_TIMEOUT)
     print(f"[model] embedding {C.MODEL_NAME} on {resolved}")
 
     if with_reranker:

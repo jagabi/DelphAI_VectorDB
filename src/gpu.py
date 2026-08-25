@@ -29,6 +29,34 @@ def _index(device: str) -> int:
     return int(device.split(":")[1]) if ":" in device else 0
 
 
+def diagnose_cpu_fallback() -> None:
+    """GPU 가 있어야 하는데 CPU 로 떨어졌을 때 왜 그런지 알려준다.
+
+    가장 흔한 원인은 CPU 전용 torch 휠이 설치된 경우다. PyPI 기본 휠이
+    그럴 수 있어서, cu124 인덱스에서 다시 받아야 한다.
+    """
+    import os
+
+    build = torch.__version__
+    cuda_build = torch.version.cuda
+    print(f"[warn] CUDA 를 못 씁니다. CPU 로 돕니다 (bge-m3 는 CPU 에서 매우 느립니다)")
+    print(f"       torch={build}  torch.version.cuda={cuda_build}")
+
+    if cuda_build is None:
+        print("       -> CPU 전용 빌드입니다. CUDA 빌드로 다시 설치하세요:")
+        print("          pip uninstall -y torch")
+        print("          pip install torch --index-url "
+              "https://download.pytorch.org/whl/cu124")
+        return
+
+    hidden = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if hidden is not None and hidden.strip() in ("", "-1"):
+        print(f"       -> CUDA_VISIBLE_DEVICES={hidden!r} 때문에 GPU 가 가려져 있습니다")
+        return
+
+    print("       -> CUDA 빌드는 맞는데 드라이버가 안 잡힙니다. nvidia-smi 를 확인하세요")
+
+
 def total_gib(device: str) -> float:
     return torch.cuda.get_device_properties(_index(device)).total_memory / (1 << 30)
 

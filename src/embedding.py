@@ -20,9 +20,14 @@ def is_oom(exc: Exception) -> bool:
 
 
 def resolve_device(requested: str = "auto") -> str:
-    if requested in (None, "", "auto"):
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    return requested
+    """auto 면 CUDA 가 쓸 수 있을 때만 GPU. 아니면 이유를 알려주고 CPU."""
+    if requested not in (None, "", "auto"):
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    from . import gpu
+    gpu.diagnose_cpu_fallback()
+    return "cpu"
 
 
 def build(

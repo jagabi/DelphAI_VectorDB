@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -134,7 +135,9 @@ RELEASE_CACHE = _env("RELEASE_CACHE", "1") not in ("0", "false", "False")
 
 # 단편화를 줄여 상한 안에서 더 많이 쓸 수 있게 한다.
 # torch 가 CUDA 를 초기화하기 전에 설정되어야 해서 여기서 건다.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Windows 는 expandable_segments 를 지원하지 않아 경고만 뜨므로 건너뛴다.
+if not sys.platform.startswith("win"):
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +159,19 @@ RERANKER_BATCH_CPU = _env_int("RERANKER_BATCH_CPU", 8)
 SEARCH_CANDIDATES = _env_int("SEARCH_CANDIDATES", 50)   # 벡터로 뽑는 후보 수
 SEARCH_LIMIT = _env_int("SEARCH_LIMIT", 10)             # 리랭커 통과 후 최종 개수
 KEYWORD_LIMIT = _env_int("KEYWORD_LIMIT", 5)            # 제목 키워드 검색 기본 개수
+
+# HNSW 탐색 폭. 크면 정확하고 느리다.
+SEARCH_HNSW_EF = _env_int("SEARCH_HNSW_EF", 64)
+
+# rescore 는 int8 로 뽑은 후보를 원본 float32 로 다시 재는 단계다.
+# 그런데 최종 순서는 어차피 리랭커(cross-encoder)가 정하므로, 후보 선별 단계의
+# 양자화 오차는 리랭커가 흡수한다. 게다가 rescore 는 원본 벡터를 디스크에서
+# 랜덤하게 읽어와 느린 스토리지에서는 검색 시간을 몇 배로 늘린다.
+# 그래서 기본은 끄고, 리랭커를 안 쓸 때만 켜는 것을 권한다.
+SEARCH_RESCORE = _env("SEARCH_RESCORE", "0") not in ("0", "false", "False")
+
+# Qdrant 검색 요청의 서버측 제한시간(초).
+SEARCH_TIMEOUT = _env_int("SEARCH_TIMEOUT", 120)
 
 
 # ---------------------------------------------------------------------------

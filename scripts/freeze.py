@@ -56,7 +56,29 @@ def main() -> int:
 
     if missing:
         print("# 미설치:", ", ".join(missing), file=sys.stderr)
+
+    _warn_if_cpu_torch()
     return 0
+
+
+def _warn_if_cpu_torch() -> None:
+    """CPU 전용 torch 가 섞여 들어가면 여기서 걸러낸다.
+
+    pip 가 pytorch 인덱스 대신 PyPI 에서 CPU 휠을 집어가는 일이 흔하다.
+    그대로 requirements 에 박히면 다음 설치 때도 CPU 로 굳는다.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.version.cuda:
+        return
+    print("", file=sys.stderr)
+    print(f"# [warn] torch={torch.__version__} 는 CPU 전용 빌드입니다.",
+          file=sys.stderr)
+    print("#        GPU 머신이라면 다시 설치한 뒤 freeze 를 다시 돌리세요:", file=sys.stderr)
+    print("#          pip install --force-reinstall torch "
+          "--index-url https://download.pytorch.org/whl/cu124", file=sys.stderr)
 
 
 if __name__ == "__main__":

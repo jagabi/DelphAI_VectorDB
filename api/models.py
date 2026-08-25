@@ -40,8 +40,11 @@ class SearchRequest(Filters):
     rerank: bool = Field(True, description="cross-encoder 재정렬. 서버에 모델이 없으면 무시")
     dedupe: bool = Field(True, description="같은 논문의 중복 레코드를 합침")
 
-    hnsw_ef: int = Field(128, ge=16, le=1024, description="클수록 정확하고 느림")
-    rescore: bool = Field(True, description="원본 float32 로 재정렬")
+    hnsw_ef: int = Field(C.SEARCH_HNSW_EF, ge=16, le=1024,
+                         description="클수록 정확하고 느림")
+    rescore: bool = Field(C.SEARCH_RESCORE,
+                          description="원본 float32 로 후보를 다시 잼. "
+                                      "리랭커를 쓰면 불필요하고 느리기만 하다")
     oversampling: float = Field(2.0, ge=1.0, le=10.0)
 
 
