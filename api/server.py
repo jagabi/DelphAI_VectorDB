@@ -4,10 +4,15 @@
 
 Qdrant 를 직접 노출하지 않는다. Qdrant REST 에는 컬렉션 삭제 API 가 그대로
 들어 있어서, 그걸 터널로 열면 며칠짜리 적재를 한 번의 DELETE 로 잃을 수 있다.
-여기는 검색 두 개와 /health 뿐이고 쓰기 경로가 아예 없다.
+여기는 검색 세 개와 /health 뿐이고 쓰기 경로가 아예 없다.
 
-  POST /search    의미(벡터) 검색 -> 중복 제거 -> 리랭커 -> top N
-  POST /keyword   제목 키워드 검색 (벡터 미사용)
+  POST /search        의미(벡터) 검색 -> 중복 제거 -> 리랭커 -> top N
+  POST /search/batch  질의 여러 개를 한 번에 (임베딩/검색/리랭킹 모두 배치)
+  POST /keyword       제목 키워드 검색 (벡터 미사용)
+
+검색은 qdrant-client 를 직접 쓴다. langchain 의 similarity_search 는 서버측
+timeout 을 넘길 방법이 없어 60초 기본값에 걸리고, 배치 질의도 지원하지 않는다.
+(적재 경로인 post.py 는 langchain 을 그대로 쓴다.)
 
 임베딩과 리랭킹 모두 서버 GPU 에서 하므로 클라이언트는 아무 의존성도 필요 없다.
 """
@@ -26,13 +31,19 @@ from qdrant_client import models
 
 from src import config as C
 from src import dedupe as dd
-from src import embedding, gpu, store
+from src import embedding, gpu
 
-from .models import (Filters, Health, Hit, KeywordRequest, SearchRequest,
-                     SearchResponse)
+from .models import (BatchSearchRequest, BatchSearchResponse, Filters, Health,
+                     Hit, KeywordRequest, SearchRequest, SearchResponse)
 
 STATE: dict = {}
 GPU_LOCK = threading.Lock()   # 임베딩과 리랭킹이 GPU 를 서로 밟지 않도록
+
+TIMEOUT_HINT = (
+    "Qdrant 검색이 제한시간 안에 끝나지 않았습니다. 보통 컬렉션 세그먼트가 많거나 "
+    "스토리지가 느릴 때 납니다. rescore=false, hnsw_ef 낮추기, candidates 줄이기 "
+    "순으로 시도해 보세요."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +92,7 @@ def to_filter(req: Filters, extra: list | None = None) -> models.Filter | None:
 def to_item(payload: dict, *, vector_score: float | None = None) -> dict:
     """qdrant payload -> 내부 표현. 여기서 텍스트를 한 번만 정리한다."""
     return {
+        "_payload": payload,
         "openalex_id": payload.get("openalex_id"),
         "doi": payload.get("doi"),
         "title": clean(payload.get("title")),
@@ -99,18 +111,18 @@ def rerank_text(item: dict) -> str:
     """리랭커에 넣을 문서 표현. 제목 + 초록."""
     title = item.get("title") or ""
     abstract = item.get("abstract") or ""
-    return f"{title}\n{abstract}".strip() or title or abstract
+    return f"{title}\n{abstract}".strip()
 
 
-def to_hits(items: list[dict]) -> list[Hit]:
+def to_hits(items: list[dict], *, raw: bool = False) -> list[Hit]:
     hits = []
     for rank, item in enumerate(items, start=1):
         score = item.get("rerank_score")
         if score is None:
-            score = item.get("vector_score") or 0.0
+            score = item.get("vector_score")
         hits.append(Hit(
             rank=rank,
-            score=float(score),
+            score=None if score is None else float(score),
             vector_score=item.get("vector_score"),
             rerank_score=item.get("rerank_score"),
             duplicates=item.get("duplicates", 1),
@@ -124,20 +136,83 @@ def to_hits(items: list[dict]) -> list[Hit]:
             field=item.get("field"),
             country=item.get("country"),
             type=item.get("type"),
+            payload=item.get("_payload") if raw else None,
         ))
     return hits
 
 
-def maybe_rerank(query: str, items: list[dict], *, want: bool, top_k: int) -> bool:
-    """리랭킹을 수행했으면 True. 모델이 없으면 조용히 건너뛴다."""
-    reranker = STATE.get("reranker")
-    if not (want and reranker and items):
-        del items[top_k:]
-        return False
+# ---------------------------------------------------------------------------
+# 검색 코어
+# ---------------------------------------------------------------------------
+
+def embed_queries(queries: list[str]) -> list[list[float]]:
+    """질의 여러 개를 한 번의 forward 로 임베딩한다."""
     with GPU_LOCK:
-        ranked = reranker.rerank(query, items, text_of=rerank_text, top_k=top_k)
-    items[:] = ranked
-    return True
+        return STATE["embeddings"].embed_documents(queries)
+
+
+def vector_search(queries: list[str], req: SearchRequest, fetch: int
+                  ) -> list[list[dict]]:
+    """질의별 후보 목록. 한 번의 배치 요청으로 처리한다."""
+    vectors = embed_queries(queries)
+    params = models.SearchParams(
+        # ef 는 탐색 중 들고 다니는 후보 목록의 크기다. 뽑으려는 개수보다
+        # 작으면 애초에 그만큼 채울 수가 없으므로 최소한 fetch 만큼 확보한다.
+        hnsw_ef=max(req.hnsw_ef, fetch),
+        quantization=models.QuantizationSearchParams(
+            rescore=req.rescore, oversampling=req.oversampling),
+    )
+    query_filter = to_filter(req)
+
+    responses = STATE["client"].query_batch_points(
+        collection_name=C.COLLECTION,
+        requests=[
+            models.QueryRequest(
+                query=vector, limit=fetch, filter=query_filter,
+                params=params, with_payload=True, with_vector=False,
+            )
+            for vector in vectors
+        ],
+        timeout=C.SEARCH_TIMEOUT,      # langchain 경로에선 못 넘기던 값
+    )
+    return [
+        [to_item(point.payload or {}, vector_score=float(point.score))
+         for point in response.points]
+        for response in responses
+    ]
+
+
+def refine(queries: list[str], candidate_lists: list[list[dict]],
+           *, rerank: bool, dedupe: bool, limit: int
+           ) -> tuple[list[list[dict]], list[int], bool]:
+    """중복 제거 -> 리랭킹 -> 자르기. (결과, 제거된 수, 리랭킹 여부)"""
+    removed = []
+    for index, items in enumerate(candidate_lists):
+        before = len(items)
+        if dedupe:
+            # 벡터 점수 순이므로 가장 좋은 것이 남는다
+            candidate_lists[index] = dd.dedupe(items)
+        removed.append(before - len(candidate_lists[index]))
+
+    reranker = STATE.get("reranker")
+    if not (rerank and reranker):
+        for items in candidate_lists:
+            del items[limit:]
+        return candidate_lists, removed, False
+
+    with GPU_LOCK:
+        ranked = reranker.rerank_many(queries, candidate_lists,
+                                      text_of=rerank_text, top_k=limit)
+    return ranked, removed, True
+
+
+def respond(query: str, mode: str, items: list[dict], *, began: float,
+            found: int, removed: int, reranked: bool, raw: bool) -> SearchResponse:
+    took = (time.perf_counter() - began) * 1000
+    return SearchResponse(query=query, mode=mode, count=len(items),
+                          took_ms=round(took, 1), candidates=found,
+                          reranked=reranked, deduped=removed,
+                          hits=to_hits(items, raw=raw))
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +221,8 @@ def maybe_rerank(query: str, items: list[dict], *, want: bool, top_k: int) -> bo
 
 app = FastAPI(
     title="OpenAlex Vector Search",
-    version="1.1",
+    version="1.2",
     description="읽기 전용 의미 검색 + 제목 키워드 검색. 쓰기/삭제 기능은 없습니다.",
-)
-
-
-TIMEOUT_HINT = (
-    "Qdrant 검색이 제한시간 안에 끝나지 않았습니다. 보통 컬렉션 세그먼트가 많거나 "
-    "스토리지가 느릴 때 납니다. rescore=false, hnsw_ef 낮추기, candidates 줄이기 "
-    "순으로 시도해 보세요."
 )
 
 
@@ -175,7 +243,7 @@ def on_error(request: Request, exc: Exception) -> JSONResponse:
 
 @app.get("/health", response_model=Health)
 def health() -> Health:
-    info = STATE["store"].client.get_collection(C.COLLECTION)
+    info = STATE["client"].get_collection(C.COLLECTION)
     reranker = STATE.get("reranker")
     return Health(
         status=str(info.status),
@@ -190,69 +258,86 @@ def health() -> Health:
 
 @app.post("/search", response_model=SearchResponse, dependencies=[Depends(require_key)])
 def search(req: SearchRequest) -> SearchResponse:
-    params = models.SearchParams(
-        hnsw_ef=req.hnsw_ef,
-        quantization=models.QuantizationSearchParams(
-            rescore=req.rescore, oversampling=req.oversampling),
-    )
-    # 리랭킹을 할 거면 후보를 넉넉히, 아니면 필요한 만큼만
+    began = time.perf_counter()
     fetch = max(req.candidates, req.limit) if req.rerank else req.limit
 
-    began = time.perf_counter()
-    with GPU_LOCK:
-        results = STATE["store"].similarity_search_with_score(
-            req.query, k=fetch, filter=to_filter(req), search_params=params)
+    candidates = vector_search([req.query], req, fetch)
+    found = len(candidates[0])
+    results, removed, reranked = refine(
+        [req.query], candidates, rerank=req.rerank, dedupe=req.dedupe,
+        limit=req.limit)
 
-    items = [to_item(doc.metadata | {C.TEXT_FIELD: doc.page_content},
-                     vector_score=float(score))
-             for doc, score in results]
-
-    found = len(items)
-    if req.dedupe:
-        items = dd.dedupe(items)          # 벡터 점수 순이므로 가장 좋은 것이 남는다
-    removed = found - len(items)
-
-    reranked = maybe_rerank(req.query, items, want=req.rerank, top_k=req.limit)
-    took = (time.perf_counter() - began) * 1000
     if C.RELEASE_CACHE:
         gpu.release(STATE["device"])   # 옆에서 도는 모델에 VRAM 을 돌려준다
+    return respond(req.query, "vector", results[0], began=began, found=found,
+                   removed=removed[0], reranked=reranked, raw=req.raw)
 
-    return SearchResponse(query=req.query, mode="vector", count=len(items),
-                          took_ms=round(took, 1), candidates=found,
-                          reranked=reranked, deduped=removed, hits=to_hits(items))
+
+@app.post("/search/batch", response_model=BatchSearchResponse,
+          dependencies=[Depends(require_key)])
+def search_batch(req: BatchSearchRequest) -> BatchSearchResponse:
+    """질의 여러 개를 한 번에.
+
+    각 단계가 전부 배치로 묶인다.
+      임베딩  질의 N개를 한 번의 forward 로
+      검색    query_batch_points 로 왕복 1회. 서버가 내부적으로 병렬 처리하고
+              세그먼트와 캐시를 재사용하므로 N번 따로 부르는 것보다 훨씬 빠르다
+      리랭킹  모든 (질의, 문서) 쌍을 한 번의 forward 로
+    """
+    began = time.perf_counter()
+    fetch = max(req.candidates, req.limit) if req.rerank else req.limit
+
+    candidates = vector_search(req.queries, req, fetch)
+    found = [len(items) for items in candidates]
+    results, removed, reranked = refine(
+        req.queries, candidates, rerank=req.rerank, dedupe=req.dedupe,
+        limit=req.limit)
+
+    if C.RELEASE_CACHE:
+        gpu.release(STATE["device"])
+
+    took = round((time.perf_counter() - began) * 1000, 1)
+    return BatchSearchResponse(
+        count=len(req.queries),
+        took_ms=took,
+        results=[
+            SearchResponse(query=query, mode="vector", count=len(items),
+                           took_ms=took, candidates=found[i],
+                           reranked=reranked, deduped=removed[i],
+                           hits=to_hits(items, raw=req.raw))
+            for i, (query, items) in enumerate(zip(req.queries, results))
+        ],
+    )
 
 
 @app.post("/keyword", response_model=SearchResponse, dependencies=[Depends(require_key)])
 def keyword(req: KeywordRequest) -> SearchResponse:
-    """제목에 특정 단어/구문이 든 문서를 찾는다. 벡터를 쓰지 않는다."""
-    match = _text_match(req.query, req.phrase)
-    condition = models.FieldCondition(key="title", match=match)
-    query_filter = to_filter(req, extra=[condition])
+    """제목에 특정 단어/구문이 든 문서를 찾는다. 벡터를 쓰지 않는다.
 
+    payload 인덱스 조회라 벡터 검색보다 훨씬 빠르다. 대신 의미가 아니라
+    표기가 기준이다.
+    """
+    began = time.perf_counter()
+    condition = models.FieldCondition(key="title",
+                                      match=_text_match(req.query, req.phrase))
     # 중복/재정렬을 감안해 넉넉히 훑는다 (인덱스 조회라 비용이 작다)
     fetch = min(req.limit * 10, 500) if (req.dedupe or req.rerank) else req.limit
 
-    began = time.perf_counter()
-    points, _ = STATE["store"].client.scroll(
-        collection_name=C.COLLECTION, scroll_filter=query_filter,
+    points, _ = STATE["client"].scroll(
+        collection_name=C.COLLECTION,
+        scroll_filter=to_filter(req, extra=[condition]),
         limit=fetch, with_payload=True, with_vectors=False)
 
-    items = [to_item(p.payload or {}) for p in points]
+    items = [to_item(point.payload or {}) for point in points]
     found = len(items)
-    if req.dedupe:
-        items = dd.dedupe(items)
-    removed = found - len(items)
+    results, removed, reranked = refine(
+        [req.query], [items], rerank=req.rerank, dedupe=req.dedupe,
+        limit=req.limit)
 
-    reranked = maybe_rerank(req.query, items, want=req.rerank, top_k=req.limit)
-    if not reranked:
-        del items[req.limit:]
-    took = (time.perf_counter() - began) * 1000
-    if C.RELEASE_CACHE:
+    if C.RELEASE_CACHE and reranked:
         gpu.release(STATE["device"])
-
-    return SearchResponse(query=req.query, mode="keyword", count=len(items),
-                          took_ms=round(took, 1), candidates=found,
-                          reranked=reranked, deduped=removed, hits=to_hits(items))
+    return respond(req.query, "keyword", results[0], began=began, found=found,
+                   removed=removed[0], reranked=reranked, raw=req.raw)
 
 
 def _text_match(text: str, phrase: bool):
@@ -269,17 +354,22 @@ def _text_match(text: str, phrase: bool):
 def build(device: str = "auto", api_key: str = "", *, with_reranker: bool = True,
           reranker_device: str | None = None, tf32: bool = True,
           memory_gib: float | None = None) -> str:
-    """모델과 벡터스토어를 올리고 API 키를 확정한다. 키를 반환."""
+    """모델과 Qdrant 연결을 올리고 API 키를 확정한다. 키를 반환."""
+    from src import collection as coll
+    from src.store import check_collection
+
     key = api_key or C.API_KEY or secrets.token_urlsafe(24)
     STATE["api_key"] = key
 
-    # 질의는 한 번에 하나라 배치를 크게 잡을 이유가 없다
     embeddings, resolved = embedding.build(device, batch_size=8, tf32=tf32,
                                            memory_gib=memory_gib)
+    STATE["embeddings"] = embeddings
     STATE["device"] = resolved
-    STATE["store"] = store.build_search_store(
-        embeddings, timeout=C.SEARCH_TIMEOUT)
     print(f"[model] embedding {C.MODEL_NAME} on {resolved}")
+
+    client = coll.client(timeout=C.SEARCH_TIMEOUT)
+    check_collection(client)
+    STATE["client"] = client
 
     if with_reranker:
         from src.reranker import Reranker

@@ -20,6 +20,12 @@
     python client.py --keyword-search "swarm robotics"
         제목 키워드 검색. 기본 5개.
 
+질의를 여러 개 보낼 때는 -q 를 반복하거나 파일로 준다. 서버가 임베딩/검색/
+리랭킹을 모두 배치로 묶어 처리하므로 하나씩 보내는 것보다 훨씬 빠르다.
+
+    python client.py -q "swarm robotics" -q "graph neural network" -q "LLM eval"
+    python client.py --queries-file queries.txt
+
 필터는 두 방식 모두 동일하게 쓸 수 있다:
 
     python client.py "graph neural network" --year-from 2024 --field "Computer Science"
@@ -126,7 +132,10 @@ def render(data: dict, args) -> None:
 
     for hit in data["hits"]:
         dup = f" x{hit['duplicates']}" if hit.get("duplicates", 1) > 1 else ""
-        print(f"\n{hit['rank']:3d}. [{hit['score']:.4f}]{dup} "
+        score = hit.get("score")
+        # 키워드 검색은 필터라 점수가 없다
+        mark = f"[{score:.4f}]" if score is not None else "[  --  ]"
+        print(f"\n{hit['rank']:3d}. {mark}{dup} "
               f"{clean(hit.get('title')) or '(제목 없음)'}")
 
         if args.meta:
@@ -152,6 +161,10 @@ def parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("query", nargs="*", help="질의문 (없으면 대화형)")
+    p.add_argument("-q", "--query", dest="queries", action="append", metavar="TEXT",
+                   help="질의를 여러 개 보낼 때 반복해서 지정 (배치)")
+    p.add_argument("--queries-file", metavar="PATH",
+                   help="한 줄에 하나씩 적힌 질의 파일 (배치)")
 
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--vector-search", action="store_true",
@@ -191,7 +204,10 @@ def parse_args(argv=None):
     o.add_argument("--full", action="store_true", help="초록 전문 (기본 300자)")
     o.add_argument("--no-abstract", action="store_true", help="초록 생략")
     o.add_argument("--meta", action="store_true", help="연도/저널/토픽/점수/DOI")
-    o.add_argument("--json", action="store_true", help="원본 JSON")
+    o.add_argument("--json", action="store_true",
+                   help="응답 전체를 JSON 으로. --raw 와 같이 쓰면 payload 원본까지")
+    o.add_argument("--raw", action="store_true",
+                   help="Qdrant payload 를 통째로 받는다 (모든 필드)")
     o.add_argument("--no-dedupe", action="store_true", help="중복 제거 끄기")
 
     c = p.add_argument_group("접속 (.env 로 대신할 수 있음)")
@@ -203,6 +219,22 @@ def parse_args(argv=None):
                    help="쓸 .env 경로 (기본: client.py 옆 또는 현재 디렉토리)")
     c.add_argument("--timeout", type=int, default=120)
     return p.parse_args(argv)
+
+
+def collect_queries(args) -> list[str]:
+    """-q 반복과 --queries-file 을 합쳐 배치 질의 목록을 만든다."""
+    queries = list(args.queries or [])
+    if args.queries_file:
+        text = Path(args.queries_file).read_text(encoding="utf-8")
+        queries += [line.strip() for line in text.splitlines() if line.strip()]
+    return queries
+
+
+def build_batch_payload(queries: list[str], args) -> tuple[str, dict]:
+    _, payload = build_payload(queries[0], args)
+    payload.pop("query", None)
+    payload["queries"] = queries
+    return "/search/batch", payload
 
 
 def build_payload(query: str, args) -> tuple[str, dict]:
@@ -219,13 +251,14 @@ def build_payload(query: str, args) -> tuple[str, dict]:
         limit = args.limit if args.limit is not None else KEYWORD_LIMIT
         return "/keyword", {
             "query": query, "limit": limit, "phrase": args.phrase,
-            "dedupe": dedupe, "rerank": args.keyword_rerank, **filters,
+            "dedupe": dedupe, "rerank": args.keyword_rerank,
+            "raw": args.raw, **filters,
         }
 
     limit = args.limit if args.limit is not None else VECTOR_LIMIT
     return "/search", {
         "query": query, "limit": limit, "candidates": args.candidates,
-        "rerank": not args.no_rerank, "dedupe": dedupe,
+        "rerank": not args.no_rerank, "dedupe": dedupe, "raw": args.raw,
         "rescore": args.rescore,
         **({"hnsw_ef": args.hnsw_ef} if args.hnsw_ef else {}), **filters,
     }
@@ -248,10 +281,26 @@ def main(argv=None) -> int:
     def run(query: str) -> None:
         path, payload = build_payload(query, args)
         data = call(args.url, path, args.key, payload, args.timeout)
-        if args.json:
+        if args.json or args.raw:
             print(json.dumps(data, ensure_ascii=False, indent=2))
         else:
             render(data, args)
+
+    batch = collect_queries(args)
+    if batch:
+        if args.keyword_search:
+            for query in batch:          # 키워드 검색은 이미 빨라 배치가 없다
+                run(query)
+            return 0
+        path, payload = build_batch_payload(batch, args)
+        data = call(args.url, path, args.key, payload, args.timeout)
+        if args.json or args.raw:
+            print(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            print(f"\n### 질의 {data['count']}개 / 전체 {data['took_ms']} ms")
+            for result in data["results"]:
+                render(result, args)
+        return 0
 
     if args.query:
         run(" ".join(args.query))

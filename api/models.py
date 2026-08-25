@@ -39,13 +39,24 @@ class SearchRequest(Filters):
 
     rerank: bool = Field(True, description="cross-encoder 재정렬. 서버에 모델이 없으면 무시")
     dedupe: bool = Field(True, description="같은 논문의 중복 레코드를 합침")
+    raw: bool = Field(False, description="Qdrant payload 를 통째로 payload 필드에 실어준다")
 
     hnsw_ef: int = Field(C.SEARCH_HNSW_EF, ge=16, le=1024,
-                         description="클수록 정확하고 느림")
+                         description="HNSW 그래프를 훑을 때 들고 다니는 후보 목록 크기. "
+                                     "클수록 놓치는 문서가 줄지만 느리다. "
+                                     "candidates 보다 작으면 자동으로 올린다")
     rescore: bool = Field(C.SEARCH_RESCORE,
                           description="원본 float32 로 후보를 다시 잼. "
                                       "리랭커를 쓰면 불필요하고 느리기만 하다")
     oversampling: float = Field(2.0, ge=1.0, le=10.0)
+
+
+class BatchSearchRequest(SearchRequest):
+    """질의 여러 개를 한 번에. 파라미터는 모든 질의에 공통으로 적용된다."""
+
+    queries: list[str] = Field(..., min_length=1, max_length=32,
+                               description="질의 목록")
+    query: str = Field("", exclude=True)   # 부모의 단일 query 는 쓰지 않는다
 
 
 class KeywordRequest(Filters):
@@ -59,11 +70,14 @@ class KeywordRequest(Filters):
     phrase: bool = Field(False, description="단어 나열이 아니라 구문 전체로 일치")
     dedupe: bool = Field(True)
     rerank: bool = Field(False, description="찾은 것들을 질의 기준으로 재정렬")
+    raw: bool = Field(False, description="Qdrant payload 를 통째로 payload 필드에 실어준다")
 
 
 class Hit(BaseModel):
     rank: int
-    score: float = Field(..., description="리랭킹했으면 리랭커 점수, 아니면 벡터 유사도")
+    score: float | None = Field(
+        None, description="리랭킹했으면 리랭커 점수, 아니면 벡터 유사도. "
+                          "키워드 검색은 필터라 점수가 없다(null)")
     vector_score: float | None = Field(None, description="벡터 검색 코사인 점수")
     rerank_score: float | None = None
     duplicates: int = Field(1, description="합쳐진 동일 논문 레코드 수 (1이면 중복 없음)")
@@ -79,6 +93,8 @@ class Hit(BaseModel):
     country: str | None = None
     type: str | None = None
 
+    payload: dict | None = Field(None, description="raw=true 일 때 Qdrant payload 원본")
+
 
 class SearchResponse(BaseModel):
     query: str
@@ -89,6 +105,12 @@ class SearchResponse(BaseModel):
     reranked: bool = False
     deduped: int = Field(0, description="중복으로 제거된 개수")
     hits: list[Hit]
+
+
+class BatchSearchResponse(BaseModel):
+    count: int = Field(..., description="질의 개수")
+    took_ms: float = Field(..., description="배치 전체 소요 시간")
+    results: list[SearchResponse]
 
 
 class Health(BaseModel):

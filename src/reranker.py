@@ -72,10 +72,13 @@ class Reranker:
         gpu.report_memory(self.device, "reranker")
 
     def score(self, query: str, documents: list[str], warn=print) -> list[float]:
+        """단일 질의에 대한 점수."""
+        return self._predict([(query, doc) for doc in documents], warn)
+
+    def _predict(self, pairs: list[tuple[str, str]], warn=print) -> list[float]:
         """OOM 이 나면 배치를 절반으로 줄여 재시도한다."""
-        if not documents:
+        if not pairs:
             return []
-        pairs = [(query, doc) for doc in documents]
         batch = self.batch_size
         while True:
             try:
@@ -95,10 +98,29 @@ class Reranker:
     def rerank(self, query: str, items: list[dict], *, text_of, top_k: int,
                warn=print) -> list[dict]:
         """items 를 재정렬해 상위 top_k 를 돌려준다. 각 item 에 rerank_score 를 붙인다."""
-        if not items:
-            return []
-        scores = self.score(query, [text_of(item) for item in items], warn)
-        for item, score in zip(items, scores):
-            item["rerank_score"] = score
-        items.sort(key=lambda item: item["rerank_score"], reverse=True)
-        return items[:top_k]
+        return self.rerank_many([query], [items], text_of=text_of,
+                                top_k=top_k, warn=warn)[0]
+
+    def rerank_many(self, queries: list[str], item_lists: list[list[dict]], *,
+                    text_of, top_k: int, warn=print) -> list[list[dict]]:
+        """질의 여러 개를 한 번의 forward 로 처리한다.
+
+        (질의, 문서) 쌍을 전부 펼쳐서 한 배치로 넘긴다. GPU 를 한 번만 왕복하므로
+        질의마다 따로 부르는 것보다 훨씬 빠르다.
+        """
+        pairs: list[tuple[str, str]] = []
+        spans: list[tuple[int, int]] = []          # 질의별 (시작, 끝) 구간
+        for query, items in zip(queries, item_lists):
+            start = len(pairs)
+            pairs.extend((query, text_of(item)) for item in items)
+            spans.append((start, len(pairs)))
+
+        scores = self._predict(pairs, warn) if pairs else []
+
+        out: list[list[dict]] = []
+        for items, (start, end) in zip(item_lists, spans):
+            for item, score in zip(items, scores[start:end]):
+                item["rerank_score"] = score
+            items.sort(key=lambda item: item["rerank_score"], reverse=True)
+            out.append(items[:top_k])
+        return out
