@@ -215,6 +215,39 @@ def respond(query: str, mode: str, items: list[dict], *, began: float,
                           hits=to_hits(items, raw=raw))
 
 
+# 서로 다른 분야를 훑어 HNSW 그래프의 여러 영역을 건드리게 고른 질의들
+WARMUP_TEXTS = [
+    "machine learning model evaluation",
+    "cancer treatment clinical trial",
+    "climate change carbon emissions",
+    "quantum computing algorithm",
+    "protein structure prediction",
+    "semiconductor device fabrication",
+]
+
+
+def warmup(count: int) -> None:
+    """캐시를 데운다. 백그라운드 스레드에서 부른다.
+
+    콜드 상태에서는 세그먼트와 벡터를 디스크에서 읽느라 첫 질의가 수십 초 걸린다.
+    미리 훑어 두면 실제 사용자의 첫 질의가 그 대가를 치르지 않는다.
+    """
+    texts = WARMUP_TEXTS[:max(0, count)]
+    if not texts:
+        return
+    began = time.perf_counter()
+    print(f"[warmup] 캐시를 데우는 중 ({len(texts)}개 질의, 백그라운드)")
+    for text in texts:
+        try:
+            request = SearchRequest(query=text, limit=5, candidates=20, rerank=False)
+            vector_search([text], request, 20)
+        except Exception as exc:                  # 워밍업 실패는 치명적이지 않다
+            print(f"[warmup] 건너뜀: {type(exc).__name__}: {str(exc)[:120]}")
+            return
+    print(f"[warmup] 완료 ({time.perf_counter() - began:.0f}초). "
+          f"이제 첫 질의가 빠릅니다")
+
+
 # ---------------------------------------------------------------------------
 # 앱
 # ---------------------------------------------------------------------------

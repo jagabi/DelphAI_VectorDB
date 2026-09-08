@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import secrets
 import sys
+import threading
 
 from src import config as C
 
@@ -50,6 +51,8 @@ def parse_args(argv=None):
     p.add_argument("--tunnel-name", default=C.TUNNEL_NAME,
                    help="named tunnel 이름. 비우면 퀵 터널(주소가 매번 바뀜)")
     p.add_argument("--cloudflared", default=C.CLOUDFLARED_BIN)
+    p.add_argument("--warmup", type=int, default=C.WARMUP_QUERIES, metavar="N",
+                   help="기동 직후 캐시를 데울 질의 수 (0=안 함). 백그라운드로 돈다")
     p.add_argument("--log-level", default="warning",
                    help="uvicorn 로그 레벨. info 로 하면 요청이 전부 찍힌다")
     return p.parse_args(argv)
@@ -70,6 +73,10 @@ def main(argv=None) -> int:
                  with_reranker=not args.no_reranker,
                  reranker_device=args.reranker_device,
                  tf32=not args.no_tf32, memory_gib=args.gpu_memory)
+
+    if args.warmup:
+        threading.Thread(target=server.warmup, args=(args.warmup,),
+                         daemon=True).start()
 
     tunnel = None
     if not args.no_tunnel:

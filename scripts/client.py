@@ -51,6 +51,18 @@ ENV_URL = "OPENALEX_VDB_URL"
 ENV_KEY = "OPENALEX_VDB_API_KEY"
 
 
+def force_utf8() -> None:
+    """Windows 콘솔 기본 인코딩(cp949)으로는 논문 제목의 em dash 조차 못 찍는다.
+
+    파일로 리다이렉션할 때 특히 문제라 출력 스트림을 UTF-8 로 바꾼다.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def load_env(path: str | None = None) -> Path | None:
     """.env 를 읽어 환경변수로 올린다. 이미 설정된 값은 덮어쓰지 않는다.
 
@@ -208,6 +220,8 @@ def parse_args(argv=None):
                    help="응답 전체를 JSON 으로. --raw 와 같이 쓰면 payload 원본까지")
     o.add_argument("--raw", action="store_true",
                    help="Qdrant payload 를 통째로 받는다 (모든 필드)")
+    o.add_argument("--out", metavar="PATH",
+                   help="결과 JSON 을 파일로 저장 (UTF-8). 리다이렉션보다 안전하다")
     o.add_argument("--no-dedupe", action="store_true", help="중복 제거 끄기")
 
     c = p.add_argument_group("접속 (.env 로 대신할 수 있음)")
@@ -217,7 +231,8 @@ def parse_args(argv=None):
                    help=f".env 의 {ENV_KEY}")
     c.add_argument("--env", metavar="PATH", default=None,
                    help="쓸 .env 경로 (기본: client.py 옆 또는 현재 디렉토리)")
-    c.add_argument("--timeout", type=int, default=120)
+    c.add_argument("--timeout", type=int, default=300,
+                   help="응답 대기 시간(초). 캐시가 식었으면 오래 걸린다")
     return p.parse_args(argv)
 
 
@@ -228,6 +243,16 @@ def collect_queries(args) -> list[str]:
         text = Path(args.queries_file).read_text(encoding="utf-8")
         queries += [line.strip() for line in text.splitlines() if line.strip()]
     return queries
+
+
+def emit(data: dict, args) -> None:
+    """--out 이 있으면 파일로, 없으면 표준 출력으로."""
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"[saved] {args.out}  ({len(text):,} chars)")
+    else:
+        print(text)
 
 
 def build_batch_payload(queries: list[str], args) -> tuple[str, dict]:
@@ -265,6 +290,7 @@ def build_payload(query: str, args) -> tuple[str, dict]:
 
 
 def main(argv=None) -> int:
+    force_utf8()
     argv = list(sys.argv[1:] if argv is None else argv)
     env_file = load_env(_env_path_from(argv))
     args = parse_args(argv)
@@ -281,8 +307,8 @@ def main(argv=None) -> int:
     def run(query: str) -> None:
         path, payload = build_payload(query, args)
         data = call(args.url, path, args.key, payload, args.timeout)
-        if args.json or args.raw:
-            print(json.dumps(data, ensure_ascii=False, indent=2))
+        if args.json or args.raw or args.out:
+            emit(data, args)
         else:
             render(data, args)
 

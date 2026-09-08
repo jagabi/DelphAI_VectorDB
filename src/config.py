@@ -170,8 +170,16 @@ SEARCH_HNSW_EF = _env_int("SEARCH_HNSW_EF", 64)
 # 그래서 기본은 끄고, 리랭커를 안 쓸 때만 켜는 것을 권한다.
 SEARCH_RESCORE = _env("SEARCH_RESCORE", "0") not in ("0", "false", "False")
 
-# Qdrant 검색 요청의 서버측 제한시간(초).
-SEARCH_TIMEOUT = _env_int("SEARCH_TIMEOUT", 120)
+# Qdrant 검색 요청 제한시간(초).
+# 캐시가 완전히 식은 상태(오래 안 쓰다 켰을 때)에서는 배치 질의가 2분을 넘기기도 한다.
+SEARCH_TIMEOUT = _env_int("SEARCH_TIMEOUT", 300)
+
+# 기동 직후 캐시를 데울 질의 수. 0 이면 워밍업 안 함.
+#
+# 콜드 상태에서는 세그먼트와 벡터를 디스크에서 읽느라 첫 질의가 수십 초 걸린다.
+# 미리 몇 번 훑어 두면 HNSW 그래프와 양자화 벡터가 페이지 캐시에 올라와,
+# 실제 사용자의 첫 질의가 그 대가를 치르지 않는다. 백그라운드로 돈다.
+WARMUP_QUERIES = _env_int("WARMUP_QUERIES", 4)
 
 
 # ---------------------------------------------------------------------------
