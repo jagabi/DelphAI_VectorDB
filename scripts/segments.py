@@ -52,6 +52,15 @@ def find(node, predicate):
             yield from find(item, predicate)
 
 
+def navigate(node, path: str):
+    """점으로 구분된 경로를 따라간다. 리스트는 숫자 인덱스."""
+    for part in path.split("."):
+        if not part:
+            continue
+        node = node[int(part)] if isinstance(node, list) else node[part]
+    return node
+
+
 def tree(node, depth: int, limit: int, prefix: str = "") -> None:
     """키 뼈대만 찍는다. 값이 큰 리스트면 길이와 첫 원소만."""
     if depth <= 0:
@@ -178,6 +187,8 @@ def parse_args(argv=None):
     p.add_argument("--timeout", type=int, default=120)
     p.add_argument("--raw", help="telemetry 원본 JSON 을 저장할 경로")
     p.add_argument("--tree", action="store_true", help="키 뼈대만 출력")
+    p.add_argument("--path", default="",
+                   help="이 경로 아래만 본다. 예: collections.collections.0.shards.0.local")
     p.add_argument("--depth", type=int, default=7)
     return p.parse_args(argv)
 
@@ -200,6 +211,15 @@ def main(argv=None) -> int:
         Path(args.raw).write_text(json.dumps(telemetry, indent=2),
                                   encoding="utf-8")
         print(f"[raw] {args.raw} 에 저장했습니다")
+        print()
+
+    if args.path:
+        try:
+            telemetry = navigate(telemetry, args.path)
+        except (KeyError, IndexError, ValueError) as exc:
+            print(f"[error] 경로를 따라가지 못했습니다: {exc}")
+            return 2
+        print(f"[경로] {args.path}")
         print()
 
     if args.tree:
