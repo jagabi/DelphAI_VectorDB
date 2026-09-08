@@ -50,6 +50,30 @@ def meminfo(container: str) -> dict[str, int]:
     return values
 
 
+def thread_states(container: str) -> dict[str, int]:
+    """Qdrant 프로세스의 스레드들이 각각 어떤 상태인지 센다.
+
+    D = uninterruptible sleep. 커널이 I/O 를 기다리는 중이고 깨울 수도 없는 상태다.
+        멈춘 동안 D 가 있으면 원인은 파일시스템이다.
+    R = 실행 중, S = 그냥 대기(락 포함).
+    멈췄는데 D 가 하나도 없고 전부 S 면 I/O 가 아니라 락이다.
+    """
+    try:
+        out = subprocess.run(
+            ["docker", "exec", container, "sh", "-c",
+             "cat /proc/1/task/*/stat"],
+            capture_output=True, text=True, timeout=30, shell=True)
+    except Exception:
+        return {}
+    states: dict[str, int] = {}
+    for line in out.stdout.splitlines():
+        # "pid (comm) S ..." 인데 comm 안에 공백이 있을 수 있어 ')' 뒤에서 자른다
+        _, _, rest = line.partition(") ")
+        if rest:
+            states[rest[0]] = states.get(rest[0], 0) + 1
+    return states
+
+
 def telemetry(url: str, api_key: str) -> dict:
     request = urllib.request.Request(
         f"{url.rstrip('/')}/telemetry?details_level=3")
@@ -86,8 +110,9 @@ def main(argv=None) -> int:
     print(f"[vitals] {args.qdrant_url} / {args.container}  "
           f"{args.interval:.0f}초 간격  (Ctrl+C 로 종료)")
     print()
-    header = (f"{'시각':>8} {'상태':>7} {'opt':>12} {'queue':>6} {'코어':>6} "
-              f"{'free':>8} {'cache':>8} {'mapped':>8} {'anon활성':>9} {'swap사용':>9}")
+    header = (f"{'시각':>8} {'상태':>7} {'opt':>12} {'queue':>6} "
+              f"{'실행R':>6} {'IO대기D':>8} {'대기S':>6} {'스레드':>6} "
+              f"{'free':>7} {'cache':>7} {'mapped':>7} {'cpu델타':>10}")
     print(header)
     print("-" * len(header))
 
@@ -100,6 +125,7 @@ def main(argv=None) -> int:
         now = time.perf_counter()
         tel = telemetry(args.qdrant_url, args.api_key)
         mem = meminfo(args.container)
+        states = thread_states(args.container)
 
         shard = dig(tel, "collections", "collections", 0, "shards", 0, "local",
                     default={})
@@ -109,24 +135,27 @@ def main(argv=None) -> int:
 
         cpu_now = dig(tel, "hardware", "collection_data", C.COLLECTION, "cpu",
                       default=None)
-        cores = "-"
+        # Qdrant 의 cpu 카운터는 단위가 명시돼 있지 않다. 절대값은 믿지 말고
+        # "움직이는가 / 멈춰 있는가" 만 본다.
+        delta = "-"
         if cpu_now is not None:
             if previous_cpu is not None and previous_at is not None:
                 span = now - previous_at
-                # 누적 CPU 는 마이크로초. 경과 시간으로 나누면 코어 몇 개분인지 나온다.
-                cores = f"{(cpu_now - previous_cpu) / 1e6 / span:.2f}" if span else "-"
+                delta = f"{(cpu_now - previous_cpu) / span:,.0f}" if span else "-"
             previous_cpu, previous_at = float(cpu_now), now
 
         def gib(key: str) -> str:
             return f"{mem[key] / GIB:.1f}" if key in mem else "-"
 
-        swap_used = "-"
-        if "SwapTotal" in mem and "SwapFree" in mem:
-            swap_used = f"{(mem['SwapTotal'] - mem['SwapFree']) / GIB:.1f}"
+        running = states.get("R", 0)
+        blocked = states.get("D", 0)
+        sleeping = states.get("S", 0)
+        total = sum(states.values())
 
         print(f"{time.strftime('%H:%M:%S'):>8} {status:>7} {optimized:>12,} "
-              f"{queue:>6} {cores:>6} {gib('MemFree'):>8} {gib('Cached'):>8} "
-              f"{gib('Mapped'):>8} {gib('Active(anon)'):>9} {swap_used:>9}")
+              f"{queue:>6} {running:>6} {blocked:>8} {sleeping:>6} {total:>6} "
+              f"{gib('MemFree'):>7} {gib('Cached'):>7} {gib('Mapped'):>7} "
+              f"{delta:>10}")
 
         if args.count and turn >= args.count:
             break
