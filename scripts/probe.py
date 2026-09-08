@@ -12,12 +12,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 from qdrant_client import QdrantClient, models
 
-from src import config as C
+# scripts/ 에서 실행해도 레포 루트의 src 를 찾을 수 있게
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src import config as C  # noqa: E402
 
 
 def timed(label: str, fn):
