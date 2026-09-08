@@ -86,6 +86,47 @@ def random_vector(rng) -> list[float]:
     return (vec / np.linalg.norm(vec)).tolist()
 
 
+def repeat(client, name: str, rng, args) -> int:
+    """같은 검색을 반복하며 시간이 줄어드는지 본다.
+
+    HNSW 는 그래프를 걸어가며 링크를 읽는데, 그 링크가 캐시에 없으면 홉마다
+    디스크를 기다린다. 반복해서 걸으면 지나간 자리가 캐시에 남아 점점 빨라진다.
+    시간이 계단처럼 줄면 원인은 캐시고, 평평하면 캐시가 아니다.
+    """
+    print(f"  limit {args.limit} / ef {args.ef} 를 {args.repeat}회")
+    print(f"  벡터: {'매번 같은 것' if args.same_vector else '매번 새 난수'}")
+    print()
+
+    fixed = random_vector(rng) if args.same_vector else None
+    spans: list[float] = []
+    for turn in range(1, args.repeat + 1):
+        vector = fixed if fixed is not None else random_vector(rng)
+        began = time.perf_counter()
+        try:
+            client.query_points(
+                collection_name=name, query=vector, limit=args.limit,
+                search_params=models.SearchParams(
+                    hnsw_ef=args.ef,
+                    quantization=models.QuantizationSearchParams(rescore=False)),
+                with_payload=False, timeout=args.timeout)
+            elapsed = time.perf_counter() - began
+            spans.append(elapsed)
+            print(f"  {turn:3d}/{args.repeat}  {elapsed:9.2f}s")
+        except Exception as exc:
+            elapsed = time.perf_counter() - began
+            print(f"  {turn:3d}/{args.repeat}  {elapsed:9.2f}s  <- {type(exc).__name__}")
+
+    print()
+    if len(spans) >= 2:
+        first, last = spans[0], spans[-1]
+        print(f"  처음 {first:.2f}s -> 마지막 {last:.2f}s")
+        if last < first * 0.5:
+            print("  줄어들고 있다. 캐시가 채워지는 중이므로 계속 돌리면 회복된다.")
+        elif last > first * 0.8:
+            print("  거의 안 줄었다. 캐시 문제가 아니다. 다른 원인을 봐야 한다.")
+    return 0
+
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Qdrant 직접 측정")
     p.add_argument("--qdrant-url", default=C.QDRANT_URL)
@@ -96,6 +137,12 @@ def parse_args(argv=None):
                    help="검색 중 CPU 를 관찰할 컨테이너 이름")
     p.add_argument("--watch-only", action="store_true",
                    help="가장 가벼운 검색 하나만, 컨테이너를 관찰하며 실행")
+    p.add_argument("--repeat", type=int, default=0,
+                   help="같은 모양의 검색을 N 번 반복해 시간 추이를 본다")
+    p.add_argument("--limit", type=int, default=1)
+    p.add_argument("--ef", type=int, default=16)
+    p.add_argument("--same-vector", action="store_true",
+                   help="매번 같은 벡터로. 결과 캐시까지 포함해 최선의 경우를 본다")
     return p.parse_args(argv)
 
 
@@ -107,6 +154,9 @@ def main(argv=None) -> int:
     name = args.collection
 
     print(f"[probe] {args.qdrant_url} / {name}  (timeout {args.timeout}s)\n")
+
+    if args.repeat:
+        return repeat(client, name, rng, args)
 
     if args.watch_only:
         print("  가장 가벼운 검색(limit 1 / ef 16)을 돌리며 컨테이너를 관찰합니다.")
