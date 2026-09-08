@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -23,6 +25,47 @@ from qdrant_client import QdrantClient, models
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import config as C  # noqa: E402
+
+
+def sample_container(name: str) -> str | None:
+    """검색이 도는 동안 컨테이너가 CPU 를 쓰는지 본다.
+
+    CPU 가 붙어 있으면 계산 중(인덱스를 못 쓰고 전수 스캔 등),
+    0 에 가까우면 I/O 나 락을 기다리는 중이다.
+    """
+    try:
+        out = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format",
+             "{{.CPUPerc}} {{.MemUsage}}", name],
+            capture_output=True, text=True, timeout=60, shell=True)
+    except Exception:
+        return None
+    return out.stdout.strip() or None
+
+
+def watch_while(fn, container: str, interval: float = 10.0):
+    """fn 을 돌리면서 컨테이너 상태를 주기적으로 찍는다."""
+    result: dict = {}
+
+    def run():
+        try:
+            result["value"] = fn()
+        except Exception as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    began = time.perf_counter()
+    worker.start()
+    while worker.is_alive():
+        worker.join(timeout=interval)
+        if not worker.is_alive():
+            break
+        stats = sample_container(container)
+        if stats:
+            print(f"      +{time.perf_counter() - began:5.0f}s  {stats}")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 def timed(label: str, fn):
@@ -49,6 +92,10 @@ def parse_args(argv=None):
     p.add_argument("--api-key", default=C.QDRANT_API_KEY)
     p.add_argument("--collection", default=C.COLLECTION)
     p.add_argument("--timeout", type=int, default=300)
+    p.add_argument("--container", default="kisti_openalex_vdb",
+                   help="검색 중 CPU 를 관찰할 컨테이너 이름")
+    p.add_argument("--watch-only", action="store_true",
+                   help="가장 가벼운 검색 하나만, 컨테이너를 관찰하며 실행")
     return p.parse_args(argv)
 
 
@@ -60,6 +107,23 @@ def main(argv=None) -> int:
     name = args.collection
 
     print(f"[probe] {args.qdrant_url} / {name}  (timeout {args.timeout}s)\n")
+
+    if args.watch_only:
+        print("  가장 가벼운 검색(limit 1 / ef 16)을 돌리며 컨테이너를 관찰합니다.")
+        print(f"  기준선: {sample_container(args.container)}\n")
+        timed("검색 limit 1 / ef 16 (감시)", lambda: watch_while(
+            lambda: client.query_points(
+                collection_name=name, query=random_vector(rng), limit=1,
+                search_params=models.SearchParams(
+                    hnsw_ef=16,
+                    quantization=models.QuantizationSearchParams(rescore=False)),
+                with_payload=False, timeout=args.timeout),
+            args.container))
+        print("\n[해석]")
+        print("  CPU 가 100% 근처   -> 인덱스를 못 쓰고 전수 스캔 중일 가능성")
+        print("  CPU 가 0 근처      -> I/O 대기 또는 락. 계산은 안 하고 있다")
+        print("  MEM 이 오르내림    -> 캐시가 밀려나며 다시 읽는 중 (스래싱)")
+        return 0
 
     info, _ = timed("get_collection (메타데이터만)",
                     lambda: client.get_collection(name))
