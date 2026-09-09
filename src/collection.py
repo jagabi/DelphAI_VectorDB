@@ -154,3 +154,11 @@ def describe(qdrant) -> None:
     print(f"  quantization    : {info.config.quantization_config}")
     print(f"  on_disk_payload : {params.on_disk_payload}")
     print(f"  payload indexes : {len(info.payload_schema)}개")
+    # 필터를 거는 필드에 인덱스가 없으면 Qdrant 는 후보마다 payload 본문을 읽어야
+    # 한다. on_disk_payload=True 면 그게 전부 디스크 접근이라 검색이 멈춘 것처럼
+    # 느려진다. 그래서 이름과 타입, 색인된 점 수까지 확인할 수 있게 찍는다.
+    for name, schema in sorted(info.payload_schema.items()):
+        kind = getattr(schema, "data_type", schema)
+        points = getattr(schema, "points", None)
+        counted = f"{points:,}" if isinstance(points, int) else "-"
+        print(f"      {name:<50} {str(kind):<12} points={counted}")

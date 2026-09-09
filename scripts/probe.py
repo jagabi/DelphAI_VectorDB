@@ -86,6 +86,42 @@ def random_vector(rng) -> list[float]:
     return (vec / np.linalg.norm(vec)).tolist()
 
 
+def compare_exact(client, name: str, rng, args) -> int:
+    """평소 검색과 강제 전수 스캔을 나란히 잰다.
+
+    exact=True 는 인덱스를 무시하고 전 점을 훑는다. 평소 검색이 이것과 같은
+    시간이면 평소 검색도 인덱스를 안 쓰고 있다는 뜻이다.
+    """
+    print("  같은 벡터로 두 가지를 각각 잽니다.")
+    print("  평소 검색 = 인덱스 사용, exact = 강제 전수 스캔")
+    print()
+
+    vector = random_vector(rng)
+
+    def run(exact: bool):
+        return client.query_points(
+            collection_name=name, query=vector, limit=10,
+            search_params=models.SearchParams(
+                hnsw_ef=64, exact=exact,
+                quantization=models.QuantizationSearchParams(rescore=False)),
+            with_payload=False, timeout=args.timeout)
+
+    _, normal = timed("평소 검색 (hnsw_ef 64)", lambda: run(False))
+    _, exact = timed("강제 전수 스캔 (exact=true)", lambda: run(True))
+
+    print()
+    if not normal or not exact:
+        print("  한쪽이 실패해서 비교할 수 없습니다. --timeout 을 늘려보세요.")
+        return 1
+    ratio = exact / normal if normal else 0
+    print(f"  exact 가 평소보다 {ratio:.1f}배")
+    if ratio < 2:
+        print("  [!] 둘이 비슷하다 -> 평소 검색도 전수 스캔 중이다. 인덱스를 못 쓰고 있다.")
+    else:
+        print("  인덱스는 쓰이고 있다. 느린 원인은 다른 데 있다.")
+    return 0
+
+
 def repeat(client, name: str, rng, args) -> int:
     """같은 검색을 반복하며 시간이 줄어드는지 본다.
 
@@ -143,6 +179,8 @@ def parse_args(argv=None):
     p.add_argument("--ef", type=int, default=16)
     p.add_argument("--same-vector", action="store_true",
                    help="매번 같은 벡터로. 결과 캐시까지 포함해 최선의 경우를 본다")
+    p.add_argument("--compare-exact", action="store_true",
+                   help="평소 검색과 강제 전수 스캔(exact)을 나란히 재서 비교한다")
     return p.parse_args(argv)
 
 
@@ -154,6 +192,9 @@ def main(argv=None) -> int:
     name = args.collection
 
     print(f"[probe] {args.qdrant_url} / {name}  (timeout {args.timeout}s)\n")
+
+    if args.compare_exact:
+        return compare_exact(client, name, rng, args)
 
     if args.repeat:
         return repeat(client, name, rng, args)
